@@ -324,7 +324,11 @@ class ChatAgent(BaseAgent):
         game = self.ctx_swarm["game"]
         if game.get("ingame"):
             task = str(game.get("task_chain") or "").strip()
-            busy = "busy: " + task[:160] if game.get("hasActiveTask") and task else "idle, no task running"
+            # the chain starts with a long header; the useful part is "Main task: <...>"
+            if "Main task:" in task:
+                task = task[task.index("Main task:"):]
+            task = re.sub(r"class_\d+\{x=(-?\d+), y=(-?\d+), z=(-?\d+)\}", r"\1 \2 \3", task)
+            busy = "busy, don't send a new move: " + task[:160] if game.get("hasActiveTask") and task else "idle, no task running"
             parts.append(f"## Your body:\n{busy}")
         # parts = [
         #     f"# Current Situation:",
