@@ -467,6 +467,10 @@ def agent_action(action: str) -> bool:
                 # Shared account: own nick shows up as a player "IN YOU", don't attack it.
                 # Pacifist characters (char_config) don't attack anyone
                 targets = [a.lower() for a in final_split[1:]]
+                if command_name in ("follow", "gesture") and SELF_NAME.lower() in targets:
+                    reason = f"REFUSED: {SELF_NAME} is you. Pick another player or a place."
+                    _add_tool_result_log("agent_action", {"returned": reason, "call_id": call_id})
+                    return reason
                 if command_name in ("pursue", "punk") and (
                     SELF_NAME.lower() in targets or _character.get_character_config().Pacifist
                 ):

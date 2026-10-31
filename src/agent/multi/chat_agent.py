@@ -73,6 +73,7 @@ PROTECTION_RE = re.compile(r"(?i)sorry, but you can't|you don't have permission|
 # Docs scheme (see -> go -> act): in a quiet moment the model itself decides whether to walk
 # up to someone, go somewhere or stay silent. Seconds without any turn; 0 disables
 INITIATIVE_SEC = float(os.getenv("INITIATIVE_SEC", "30"))
+INITIATIVE_MAX_SEC = 300.0  # cap for the pause when quiet moments find nobody
 INITIATIVE_PROMPT = (
     "[Quiet moment, nothing new happened. See -> go -> act: look at the Players list (who is near, "
     "how far, what they hold), your body status and your plan, then choose ONE thing: walk up to "
@@ -212,6 +213,7 @@ class ChatAgent(BaseAgent):
         self._roam_went_far = False
         self._roam_stuck_count = 0
         self._last_turn = time.time()  # last time the agent took a turn (event or own)
+        self._initiative_wait = INITIATIVE_SEC  # grows while quiet moments lead nowhere
         self._auth_announced = False
         self._user_replies: Dict[str, List[float]] = {}
         self._server_lines_seen: Dict[str, float] = {}
@@ -973,9 +975,20 @@ class ChatAgent(BaseAgent):
                 "the gates are shut. Then wait.]"
             )
         self._auth_announced = False
-        if not get_nearby_players(self.ctx_swarm).get(SELF_MC_NAME):
+        near = get_nearby_players(self.ctx_swarm)
+        if not near.get(SELF_MC_NAME):
             return None
-        return INITIATIVE_PROMPT + "\n" + self._character_idea()
+        others = [n for n in near if n != SELF_MC_NAME and not CharacterManager.get_main_character().is_user_ignored(n)]
+        if others:
+            self._initiative_wait = INITIATIVE_SEC
+            return INITIATIVE_PROMPT + "\n" + self._character_idea()
+        # Alone: each quiet moment that finds nobody doubles the pause (no endless LLM chain)
+        self._initiative_wait = min(self._initiative_wait * 2, INITIATIVE_MAX_SEC)
+        return (
+            "[Quiet moment and nobody around you. Go find people: agent_action '@goto X Z' to a point "
+            "40-120 blocks away from where you stand, in a direction you haven't been. Say aloud, in "
+            "character, where you're heading. Don't shuffle a few blocks back and forth.]"
+        )
 
     def _build_roam_prompt(self) -> Optional[str]:
         """Decide the next self-started move. None = stay put (not in game, waiting for
@@ -1129,14 +1142,15 @@ class ChatAgent(BaseAgent):
             wait_elapsed = time.time() - t_wait_start
             if event:
                 print(f"[CHAT AGENT ⏱️ waited {wait_elapsed:.1f}s] Triggered by: {event.user}: {event.msg[:80]}")
+                self._initiative_wait = INITIATIVE_SEC  # something happens again: back to normal pace
                 self.respond(event)
             elif tracker.idle_seconds >= IDLE_SELF_ACTIVATE:
                 print(f"[CHAT AGENT ⏱️ waited {wait_elapsed:.1f}s] Idle self-activation ({tracker.idle_seconds:.0f}s idle)")
                 self._handle_idle_activation()
-            elif INITIATIVE_SEC > 0 and time.time() - self._last_turn >= INITIATIVE_SEC:
+            elif INITIATIVE_SEC > 0 and time.time() - self._last_turn >= self._initiative_wait:
                 prompt = self._build_initiative_prompt()
                 if prompt:
-                    print(f"[CHAT AGENT ⏱️ waited {wait_elapsed:.1f}s] Initiative ({INITIATIVE_SEC:.0f}s quiet)")
+                    print(f"[CHAT AGENT ⏱️ waited {wait_elapsed:.1f}s] Initiative ({self._initiative_wait:.0f}s quiet)")
                     self._self_activate(prompt, "initiative_trigger")
                 else:
                     self._last_turn = time.time()
