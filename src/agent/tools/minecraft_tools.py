@@ -7,6 +7,7 @@ TODO:
 - implement checking tools like @check block / @check player
 """
 
+import json
 import os
 import traceback
 from typing import Dict, TypedDict
@@ -31,10 +32,42 @@ SELF_NAME = _character.get_names().Minecraft
 MAX_GOTO_DIST = 300  # blocks from where we stand; further = made-up coordinates
 
 
+# Places where walking got us nowhere (pits, protected areas). Server-specific runtime
+# data, survives restarts; @goto near them is refused so the agent doesn't walk back in
+TRAPS_FILE = os.path.join(os.path.dirname(REPO_RESOURCE_PATH), "data", "traps.json")
+TRAP_RADIUS = 12
+
+
+def load_traps() -> list:
+    try:
+        with open(TRAPS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def add_trap(x: float, y: float, z: float) -> None:
+    traps = load_traps()
+    if any(((x - t[0]) ** 2 + (z - t[2]) ** 2) ** 0.5 < TRAP_RADIUS for t in traps):
+        return
+    traps.append([int(x), int(y), int(z)])
+    os.makedirs(os.path.dirname(TRAPS_FILE), exist_ok=True)
+    with open(TRAPS_FILE, "w", encoding="utf-8") as f:
+        json.dump(traps, f)
+    print(f"[MC ACT TOOL] Trap remembered at {int(x)} {int(y)} {int(z)}")
+
+
 def _goto_too_far(coords: list) -> str:
-    """Refusal text if @goto target is far from our position, "" if fine or unknown."""
+    """Refusal text if @goto target is far from us or inside a known trap, "" if fine."""
     try:
         gx, gz = float(coords[0]), float(coords[-1])
+    except Exception:
+        return ""
+    for t in load_traps():
+        if ((gx - t[0]) ** 2 + (gz - t[2]) ** 2) ** 0.5 < TRAP_RADIUS:
+            return (f"REFUSED: {t[0]} {t[1]} {t[2]} is a trap (pit / protected area, you got stuck "
+                    "there before). Don't go back; pick another place.")
+    try:
         me = get_nearby_players(tools_config.ctx_swarm).get(SELF_NAME)
         x, _, z = (float(v) for v in me["position"].split(","))
     except Exception:

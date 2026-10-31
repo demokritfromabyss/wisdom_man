@@ -56,6 +56,7 @@ from data_schema.ctx_structures import CtxSwarmType
 from data_schema.structure_templates import THOUGHTS_FORMAT
 from data_schema.tool_structures import SpeakEmotions, ToolBankType
 from utils.debug import print_messages
+from agent.tools.minecraft_tools import add_trap
 from utils.minecraft_helper import get_nearby_players
 
 SELF_NAME = get_name()
@@ -68,6 +69,7 @@ USER_REPLY_LIMIT = 3
 USER_REPLY_WINDOW = 60.0
 SERVER_REPEAT_WINDOW = 120.0  # identical server line within this doesn't wake the agent
 MOD_LINE_PREFIX = "§2§l§o"  # UnionClef / Alto Clef / Tungsten chat formatting
+PROTECTION_RE = re.compile(r"(?i)sorry, but you can't|you don't have permission|здесь нельзя|нет прав")
 ROAM_MEMORY = 4  # last visited players, skipped when choosing the next one
 ROAM_EXPLORE_DIST = (80, 150)  # blocks to walk when nobody new is around
 ROAM_STUCK_CHECKS = 3  # roams in a row ending within ROAM_STUCK_DIST blocks = stuck
@@ -976,6 +978,7 @@ class ChatAgent(BaseAgent):
         ):
             self._roam_positions = []
             self._roam_stuck_count += 1
+            add_trap(x, y, z)  # don't walk back here later, even after a restart
             if self._roam_stuck_count >= 2:
                 # Walking doesn't help (pit, fence, protected area) — stop dragging the body around
                 self._roam_stuck_count = 0
@@ -1031,8 +1034,9 @@ class ChatAgent(BaseAgent):
                         return False
                     if CharacterManager.get_main_character().is_user_ignored(event.user):
                         return False
-                # Mod status lines ([Alto Clef], [Tungsten], pathfinder WARNING) are not events to talk about
-                if not event.user and str(event.msg).startswith(MOD_LINE_PREFIX):
+                # Mod status lines ([Alto Clef], [Tungsten], pathfinder WARNING) and region-protection
+                # replies to the mod's digging are not events to talk about
+                if not event.user and (str(event.msg).startswith(MOD_LINE_PREFIX) or PROTECTION_RE.search(str(event.msg))):
                     return False
                 # The same server line again ("can't break that block here" x20) is not news
                 if event.type == "chat" and not event.user:
