@@ -66,6 +66,7 @@ AUTO_ROAM_INTERVAL = float(os.getenv("AUTO_ROAM_INTERVAL", "90"))
 # Replies to one speaker per window (GodUsers exempt): stops bot-to-bot ping-pong and spammers
 USER_REPLY_LIMIT = 3
 USER_REPLY_WINDOW = 60.0
+SERVER_REPEAT_WINDOW = 120.0  # identical server line within this doesn't wake the agent
 ROAM_MEMORY = 4  # last visited players, skipped when choosing the next one
 ROAM_EXPLORE_DIST = (80, 150)  # blocks to walk when nobody new is around
 ROAM_STUCK_CHECKS = 3  # roams in a row ending within ROAM_STUCK_DIST blocks = stuck
@@ -195,8 +196,10 @@ class ChatAgent(BaseAgent):
         self._roam_addressed: Dict[str, int] = {}  # nick -> ns when we walked up to talk
         self._roam_positions: List[tuple] = []
         self._roam_went_far = False
+        self._roam_stuck_count = 0
         self._auth_announced = False
         self._user_replies: Dict[str, List[float]] = {}
+        self._server_lines_seen: Dict[str, float] = {}
 
         # Interrupt rate limiting
         self._last_interrupt_time = 0.0
@@ -962,10 +965,21 @@ class ChatAgent(BaseAgent):
         else:
             self._roam_positions = []
         self._roam_went_far = True  # explore always goes far; a near target resets it below
+        if self._roam_positions and math.dist(self._roam_positions[0], (x, z)) >= ROAM_STUCK_DIST:
+            self._roam_stuck_count = 0  # we did get somewhere
         if len(self._roam_positions) == ROAM_STUCK_CHECKS and all(
             math.dist(p, (x, z)) < ROAM_STUCK_DIST for p in self._roam_positions
         ):
             self._roam_positions = []
+            self._roam_stuck_count += 1
+            if self._roam_stuck_count >= 2:
+                # Walking doesn't help (pit, fence, protected area) — stop dragging the body around
+                self._roam_stuck_count = 0
+                return (
+                    "[You're trapped: several walks in different directions didn't move you at all "
+                    "(pit, walls or a protected area). Stop walking for now. Say once, aloud, to your "
+                    "creator that you're trapped and need a hand, in character. Don't type commands.]"
+                )
             return self._explore_prompt(x, y, z, "you've been stuck in one spot for a while, the last moves didn't get you anywhere.")
 
         candidates = [
@@ -1009,6 +1023,13 @@ class ChatAgent(BaseAgent):
                 # One speaker can't keep the agent busy (bots ping-pong, spam), mentions included
                 if event.type == "chat" and event.user and not event.additional_fields.get("self", False):
                     if not self._allow_user_reply(event.user):
+                        return False
+                # The same server line again ("can't break that block here" x20) is not news
+                if event.type == "chat" and not event.user:
+                    now, key = time.time(), " ".join(str(event.msg).lower().split())
+                    seen = self._server_lines_seen.get(key, 0)
+                    self._server_lines_seen[key] = now
+                    if now - seen < SERVER_REPEAT_WINDOW:
                         return False
                 if nick_mention_check(event, SELF_NAME):
                     return True

@@ -35,6 +35,11 @@ def mc_send(message: str) -> bool:
     return result
 
 
+# Same line again within this window is dropped: a stuck loop shouldn't spam the server chat
+CHAT_REPEAT_WINDOW = 120.0
+_recent_chat_sent: Dict[str, float] = {}
+
+
 def chat(message: str) -> bool:
     """Send message to minecraft game chat. Players in game see this on screen.
 
@@ -52,6 +57,15 @@ def chat(message: str) -> bool:
     """
     call_id = _add_tool_run_log("chat", {"message": message})
     print("***GAME CHAT***", message)
+    now = time.time()
+    key = " ".join(str(message).lower().split())
+    if now - _recent_chat_sent.get(key, 0) < CHAT_REPEAT_WINDOW:
+        print("***GAME CHAT*** REPEAT DROPPED")
+        _add_tool_result_log(
+            "chat", {"returned": "Not sent: you already said exactly this. Say something new or stay silent", "call_id": call_id}
+        )
+        return False
+    _recent_chat_sent[key] = now
     try:
         result = mc_send(message)
         _add_tool_result_log("chat", {"returned": result, "call_id": call_id})
