@@ -34,6 +34,7 @@ SELF_NAME = character.get_names().Minecraft
 # ("[Tungsten]" = pathing mod status like "Follow stopped", woke the agent every few seconds)
 IGNORED_SERVER_MSGS = ("Nobody heard you", "[Tungsten]")
 _MC_FORMAT_CODE = re.compile(r"§.")
+_VANILLA_CHAT = re.compile(r"^<([A-Za-z0-9_]{2,16})>\s*(.+)$", re.S)
 
 # Agent's own chat lines, to recognise their echo when the agent and the
 # player share one Minecraft account (server may strip punctuation / cut text)
@@ -304,6 +305,12 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                             "user": msgMas.get("user", ""),
                             "msg": msgMas.get("msg", ""),
                         }
+                        # vanilla "<Nick> text" lines come without a parsed author: recover it,
+                        # otherwise players' messages look like server notices
+                        if not (msgDict["user"] or "").strip():
+                            m = _VANILLA_CHAT.match(_MC_FORMAT_CODE.sub("", msgDict["msg"] or "").strip())
+                            if m:
+                                msgDict["user"], msgDict["msg"] = m.group(1), m.group(2)
                         # server local-chat notice arrives before the player's own message
                         # and triggers the agent with nothing to answer
                         if not (msgDict["user"] or "").strip() and _MC_FORMAT_CODE.sub(
