@@ -61,10 +61,10 @@ def chat(message: str) -> bool:
     key = " ".join(str(message).lower().split())
     if now - _recent_chat_sent.get(key, 0) < CHAT_REPEAT_WINDOW:
         print("***GAME CHAT*** REPEAT DROPPED")
-        _add_tool_result_log(
-            "chat", {"returned": "Not sent: you already said exactly this. Say something new or stay silent", "call_id": call_id}
-        )
-        return False
+        # A string, not False: the model sees the tool result and should stop re-sending
+        reason = "NOT SENT: you already said exactly this, players have seen it. Don't repeat it; say something new or finish."
+        _add_tool_result_log("chat", {"returned": reason, "call_id": call_id})
+        return reason
     _recent_chat_sent[key] = now
     try:
         result = mc_send(message)

@@ -422,11 +422,9 @@ def agent_action(action: str) -> bool:
                     SELF_NAME.lower() in targets or _character.get_character_config().Pacifist
                 ):
                     print(f"[MC ACT TOOL] REFUSED {command_name} ON {targets}")
-                    _add_tool_result_log(
-                        "agent_action",
-                        {"returned": "Refused: you don't attack players, use words instead", "call_id": call_id},
-                    )
-                    return False
+                    reason = "REFUSED: you don't attack players, use words instead"
+                    _add_tool_result_log("agent_action", {"returned": reason, "call_id": call_id})
+                    return reason
 
             if len(action) > 200:
                 action = action[:200]
