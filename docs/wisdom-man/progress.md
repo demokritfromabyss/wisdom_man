@@ -24,7 +24,7 @@ python main.py -cof           # ChatAgent, без Twitch, без фильтра
 
 В `.env`: `NETTYAN_CHARACTER_NAME="WisdomMan"`, `CORE_LLM_MODEL_NAME="mistral/mistral-medium-latest"`,
 `CORE_LLM_FALLBACK_MODEL="mistral/mistral-small-latest"`, `VISION_LLM_MODEL_NAME="mistral/mistral-medium-latest"`,
-`TTS_ENDPOINT_URL="http://127.0.0.1:22231/"`, `AUTO_ROAM="TRUE"`, `AUTO_ROAM_INTERVAL=90`.
+`TTS_ENDPOINT_URL="http://127.0.0.1:22231/"`, `AUTO_ROAM="FALSE"` (свои прогулки выключены 31.10, см. ниже).
 
 Вместо Qwen можно вернуть лёгкий vosk: раскомментировать `docker-compose.simpletts.yml` в override и `SIMPLE_TTS_SPEAKER_ID=3`.
 
@@ -78,3 +78,12 @@ python main.py -cof           # ChatAgent, без Twitch, без фильтра
 - **Занятие 5 · Рейд.** Говорить в голосовом чате игры через VB-Cable. Замечать игроков, следовать за ними, комментировать. Зрение уже есть.
 - **Занятие 6 · Инициатива.** Пробуждения по расписанию, викторины «А вы знаете?» без занудства.
 - **Занятия 7–8 · Финал.** Fish TTS на арендованной видеокарте на вечер записи, демонстрация и отзывы игроков, видео бесед (OBS готов).
+
+### Прогулки выключены (31.10.2026)
+
+Самодельные прогулки (`AUTO_ROAM`) выключены: они водили персонажа по обрывам и обратно в яму. Код остался под выключателем.
+В исходной схеме курса и мода передвижением владеет сама модель: она решает, куда идти, и вызывает `agent_action`
+(`@follow`, `@goto`), а мод только исполняет («see → go → act», [AGENT_PY4J_LEVERS](https://github.com/3ndetz/unionclef/blob/main/docs/features/AGENT_PY4J_LEVERS.md)).
+Будят модель события или таймаут (в харнесе — самоактивация через 150 с тишины). Встроенные режимы мода (`@punk` — PvP,
+`@game`, `@gamer`) для мирного Мудреца не подходят. Защиты остаются включёнными: повторы в чате, лимит ответов, ловушки,
+дальний `@goto`, пацифист, `IgnoredPlayers`.
