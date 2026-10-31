@@ -25,8 +25,8 @@ class CharacterConfig(BaseModel):
     Names: CharacterNames
     Socials: CharacterSocials
     GodUsers: List[str] = Field(default_factory=list)
-    # Nicks of other AI personas on the server: talked to without a mention, rate-limited
-    AICharacters: List[str] = Field(default_factory=list)
+    # Character never attacks players (refuses chase/strike actions)
+    Pacifist: bool = False
 
 
 class CharacterConfigManager:

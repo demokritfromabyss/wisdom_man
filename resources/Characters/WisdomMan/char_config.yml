@@ -14,7 +14,5 @@ Socials:
 GodUsers:
   - guinplenn76
 
-# Other AI personas on the server
-AICharacters:
-  - LastOrder01
-  - ZeusThunderer
+# Never rude, never aggressive: refuses to chase or hit players
+Pacifist: true

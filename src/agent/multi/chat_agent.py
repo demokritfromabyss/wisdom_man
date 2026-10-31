@@ -12,7 +12,11 @@ Features:
 - Interrupt on new chat events
 """
 
+import json
+import math
 import os
+import random
+import re
 import time
 import traceback
 from typing import Any, Dict, List, Optional
@@ -28,6 +32,7 @@ from langchain_core.messages import (
 from agent.base_agent import BaseAgent
 from agent.llm_clients.lc_clients import get_llm_chain
 from agent.prompt_generation.message_builder import events_to_messages
+from agent.prompt_generation.idea_suggestor import get_random_idea
 from agent.prompt_generation.prompt_constructor import (
     SmartEventWaiter,
     get_game_status,
@@ -48,25 +53,28 @@ from data_schema.chat_structures import (
     nick_mention_check,
 )
 from data_schema.ctx_structures import CtxSwarmType
+from data_schema.structure_templates import THOUGHTS_FORMAT
 from data_schema.tool_structures import SpeakEmotions, ToolBankType
 from utils.debug import print_messages
+from utils.minecraft_helper import get_nearby_players
 
 SELF_NAME = get_name()
 SELF_MC_NAME = CharacterManager.get_main_character().get_names().Minecraft
 # Self-initiated walk to someone nearby; moves the game account, so it's a switch
 AUTO_ROAM = os.getenv("AUTO_ROAM", "FALSE").upper() == "TRUE"
 AUTO_ROAM_INTERVAL = float(os.getenv("AUTO_ROAM_INTERVAL", "90"))
-# Other AI personas wake the agent without a mention, but bot ping-pong is capped
-AI_REPLY_LIMIT = 3
-AI_REPLY_WINDOW = 60.0
-ROAM_PROMPT = (
-    "[Initiative: you've been standing around long enough. Look at the Players list "
-    f"('{SELF_MC_NAME}' is your own body, skip it). Pick someone: AI characters first, "
-    "then the closest player you haven't talked to recently. Walk to them with "
-    "agent_action '@follow <nick>', then say something to them in chat — a greeting, "
-    "a misquoted classic or an 'А вы знаете...?'. If nobody is listed, walk "
-    "somewhere 30-60 blocks away with '@goto X Y Z' and comment on the view.]"
-)
+# Replies to one speaker per window (GodUsers exempt): stops bot-to-bot ping-pong and spammers
+USER_REPLY_LIMIT = 3
+USER_REPLY_WINDOW = 60.0
+ROAM_MEMORY = 4  # last visited players, skipped when choosing the next one
+ROAM_EXPLORE_DIST = (80, 150)  # blocks to walk when nobody new is around
+ROAM_STUCK_CHECKS = 3  # roams in a row ending within ROAM_STUCK_DIST blocks = stuck
+ROAM_STUCK_DIST = 2.0
+ROAM_STUCK_FAR = 6.0  # only moves towards targets further than this count
+# Login prompt from auth plugins: body frozen, inventory hidden until password is typed
+AUTH_PROMPT_RE = re.compile(r"(?i)(/l(ogin)?\b|/reg(ister)?\b|авториз|логинь|войдите|зарегистрир)")
+AUTH_DONE_RE = re.compile(r"(?i)(успешн|success|logged in|вы вошли|добро пожаловать|welcome)")
+AUTH_PAUSE_SEC = 300.0
 MAX_TOOL_ROUNDS = 3
 MAX_RESPONSE_TOKENS = 500  # Hard limit on LLM generation per round
 ENABLE_DEBUG_PRINT_TOOL_LIST = True
@@ -183,7 +191,12 @@ class ChatAgent(BaseAgent):
 
         # Initiative and AI-persona reply limiting
         self._last_roam = time.time()
-        self._ai_replies: List[float] = []
+        self._roam_visited: List[str] = []
+        self._roam_addressed: Dict[str, int] = {}  # nick -> ns when we walked up to talk
+        self._roam_positions: List[tuple] = []
+        self._roam_went_far = False
+        self._auth_announced = False
+        self._user_replies: Dict[str, List[float]] = {}
 
         # Interrupt rate limiting
         self._last_interrupt_time = 0.0
@@ -275,6 +288,21 @@ class ChatAgent(BaseAgent):
             f"# Current Situation:",
             f"## Players:\n{users_info}",
         ]
+        # What the agent set for itself with plan / focus / pattern tools (otherwise write-only)
+        thoughts = self.ctx_swarm["states"].get("thoughts", {})
+        if not isinstance(thoughts, dict):  # redis may hand it back serialized
+            try:
+                thoughts = json.loads(thoughts)
+            except Exception:
+                thoughts = {}
+        own_state = [
+            f"{label}: {thoughts[key]}"
+            for key, label in (("plan", "Plan"), ("focus_topic", "Focus"), ("pattern", "Manner"))
+            if thoughts.get(key) and thoughts[key] != THOUGHTS_FORMAT.get(key)
+            and not thoughts[key].startswith("1 topic that we should focus on")
+        ]
+        if own_state:
+            parts.append("## Your current intentions (change with plan/focus/pattern tools):\n" + "\n".join(own_state))
         # parts = [
         #     f"# Current Situation:",
         #     f"## Game Status:\n{game_status}",
@@ -840,22 +868,136 @@ class ChatAgent(BaseAgent):
                 result.append(HumanMessage(content=content))
         return result
 
-    def _allow_ai_reply(self) -> bool:
-        """At most AI_REPLY_LIMIT reactions to other bots per AI_REPLY_WINDOW."""
+    def _allow_user_reply(self, user: str) -> bool:
+        """At most USER_REPLY_LIMIT reactions to one speaker per USER_REPLY_WINDOW.
+        Whoever they are — a bot persona or a spammer — the conversation can't loop."""
+        if CharacterManager.get_main_character().is_user_godmode(user):
+            return True
         now = time.time()
-        self._ai_replies = [t for t in self._ai_replies if now - t < AI_REPLY_WINDOW]
-        if len(self._ai_replies) >= AI_REPLY_LIMIT:
+        recent = [t for t in self._user_replies.get(user, []) if now - t < USER_REPLY_WINDOW]
+        if len(recent) >= USER_REPLY_LIMIT:
+            self._user_replies[user] = recent
             return False
-        self._ai_replies.append(now)
+        self._user_replies[user] = recent + [now]
         return True
+
+    def _character_idea(self) -> str:
+        """Random trick from the character's ideas.yml (DidYouKnow, QuizMaster...)."""
+        try:
+            return get_random_idea(self.ctx_swarm["states"].get("personality", "streamer_abstract"), include_base=False)
+        except Exception:
+            return ""
+
+    def _recent_chat(self) -> List[dict]:
+        try:
+            return self.ctx_handler.get_ctx_chat(validate=True, dict_format=True, limit=80)
+        except Exception:
+            return []
+
+    def _auth_prompt_seen(self, events: List[dict]) -> bool:
+        """Server asked to log in (/l, /login) within the last few minutes: the body is
+        frozen and the inventory hidden until the creator types the password."""
+        since = time.time_ns() - int(AUTH_PAUSE_SEC * 1e9)
+        auth_lines = [
+            ev for ev in events
+            if not ev.get("user") and int(ev.get("processing_timestamp", 0)) > since
+            and AUTH_PROMPT_RE.search(str(ev.get("msg", "")))
+        ]
+        if not auth_lines:
+            return False
+        last = max(auth_lines, key=lambda ev: int(ev.get("processing_timestamp", 0)))
+        return not AUTH_DONE_RE.search(str(last.get("msg", "")))
+
+    def _waiting_for_reply(self, user: str, events: List[dict]) -> bool:
+        """We walked up and talked to them, and they haven't said a word since."""
+        addressed_at = self._roam_addressed.get(user)
+        if not addressed_at:
+            return False
+        heard = [
+            int(ev.get("processing_timestamp", 0)) for ev in events
+            if ev.get("user") == user and ev.get("type") in ("chat", "voice")
+        ]
+        return not heard or max(heard) < addressed_at
+
+    def _explore_prompt(self, x: float, y: float, z: float, reason: str) -> str:
+        angle = random.uniform(0, 2 * math.pi)
+        dist = random.uniform(*ROAM_EXPLORE_DIST)
+        gx, gz = int(x + dist * math.cos(angle)), int(z + dist * math.sin(angle))
+        self._roam_visited = []  # new area, everyone is new again
+        return (
+            f"[Initiative: {reason} Go explore to find people: agent_action "
+            f"'@goto {gx} {int(y)} {gz}'. Say aloud what you expect to find there, in character.]"
+        )
+
+    def _build_roam_prompt(self) -> Optional[str]:
+        """Decide the next self-started move. None = stay put (not in game, waiting for
+        login, already told the creator). Otherwise: walk up to the closest person not
+        visited recently and not ignoring us, or explore when stuck / nobody new around."""
+        events = self._recent_chat()
+        if self._auth_prompt_seen(events):
+            if self._auth_announced:
+                return None
+            self._auth_announced = True
+            return (
+                "[You can't move: the server is asking to log in (/l <password>), your body "
+                "is frozen and the inventory hidden until then. Do NOT type any command and "
+                "don't guess passwords. Say once, aloud, to your creator that the gates are "
+                "shut and only the password opens them. Then wait.]"
+            )
+        self._auth_announced = False
+
+        near = get_nearby_players(self.ctx_swarm)
+        me = near.get(SELF_MC_NAME)
+        if not me:
+            return None
+        try:
+            x, y, z = (float(v) for v in me["position"].split(","))
+        except Exception:
+            return None
+
+        # Stuck: moves towards far targets left us within a couple of blocks — change
+        # direction, don't repeat. A chat with someone standing next to us isn't being stuck
+        if self._roam_went_far:
+            self._roam_positions = (self._roam_positions + [(x, z)])[-ROAM_STUCK_CHECKS:]
+        else:
+            self._roam_positions = []
+        self._roam_went_far = True  # explore always goes far; a near target resets it below
+        if len(self._roam_positions) == ROAM_STUCK_CHECKS and all(
+            math.dist(p, (x, z)) < ROAM_STUCK_DIST for p in self._roam_positions
+        ):
+            self._roam_positions = []
+            return self._explore_prompt(x, y, z, "you've been stuck in one spot for a while, the last moves didn't get you anywhere.")
+
+        candidates = [
+            p for name, p in near.items()
+            if name != SELF_MC_NAME and name not in self._roam_visited
+            and not self._waiting_for_reply(name, events)
+        ]
+        if candidates:
+            target_p = min(candidates, key=lambda p: p.get("distance") or 1e9)
+            target = target_p["name"]
+            self._roam_went_far = (target_p.get("distance") or 0) > ROAM_STUCK_FAR
+            self._roam_visited = (self._roam_visited + [target])[-ROAM_MEMORY:]
+            self._roam_addressed[target] = time.time_ns()
+            return (
+                f"[Initiative: go hang out with {target}. Walk up with agent_action "
+                f"'@follow {target}', then talk to them: one chat line, plus a voice line. "
+                "If you haven't met before, greet them and ask one short question. "
+                "Treat them by the role they've earned (newcomer, debater, ...). "
+                f"You'll move on to someone else later.]\n{self._character_idea()}"
+            )
+        return self._explore_prompt(x, y, z, "nobody new around (or they haven't answered you yet).")
 
     def step(self):
         try:
             if AUTO_ROAM and time.time() - self._last_roam >= AUTO_ROAM_INTERVAL:
-                print(f"[CHAT AGENT] Roam initiative ({AUTO_ROAM_INTERVAL:.0f}s)")
                 self._last_roam = time.time()
-                self._self_activate(ROAM_PROMPT, "roam_trigger")
-                return
+                roam_prompt = self._build_roam_prompt()
+                if roam_prompt:
+                    print(f"[CHAT AGENT] Roam initiative: {roam_prompt[:90]}")
+                    self._self_activate(roam_prompt, "roam_trigger")
+                    return
+                print("[CHAT AGENT] Roam skipped: not in game or waiting for login")
 
             tracker = self.ctx_handler.activity_tracker
             t_wait_start = time.time()
@@ -864,13 +1006,14 @@ class ChatAgent(BaseAgent):
 
             def extended_wait_check(event: CtxEventBase) -> bool:
                 # Unconditional: mentions and directives always wake
+                # One speaker can't keep the agent busy (bots ping-pong, spam), mentions included
+                if event.type == "chat" and event.user and not event.additional_fields.get("self", False):
+                    if not self._allow_user_reply(event.user):
+                        return False
                 if nick_mention_check(event, SELF_NAME):
                     return True
                 if interrupt_event_check(event):
                     return True
-                # Other AI personas: always worth a reply, within the ping-pong cap
-                if event.type == "chat" and CharacterManager.get_main_character().is_ai_character(event.user):
-                    return self._allow_ai_reply()
 
                 # Queue backlog (existing logic)
                 def check_timeout():
@@ -925,7 +1068,9 @@ class ChatAgent(BaseAgent):
 
     def _handle_idle_activation(self):
         """Self-activate when nothing has happened for a while."""
-        self._self_activate("[Nothing is happening. You are idle and bored.]", "idle_trigger")
+        self._self_activate(
+            "[Nothing is happening. You are idle and bored.]\n" + self._character_idea(), "idle_trigger"
+        )
 
     def _self_activate(self, msg: str, trigger_flag: str):
         """Respond to a synthetic system event (idle, roam initiative)."""

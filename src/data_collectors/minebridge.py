@@ -31,7 +31,9 @@ logger.setLevel(logging.FATAL)
 character = CharacterManager.get_main_character()
 SELF_NAME = character.get_names().Minecraft
 # server notices without author that should not reach the agent
-IGNORED_SERVER_MSGS = ("Nobody heard you",)
+# ("[Tungsten]" = pathing mod status like "Follow stopped", woke the agent every few seconds)
+IGNORED_SERVER_MSGS = ("Nobody heard you", "[Tungsten]")
+_MC_FORMAT_CODE = re.compile(r"§.")
 
 # Agent's own chat lines, to recognise their echo when the agent and the
 # player share one Minecraft account (server may strip punctuation / cut text)
@@ -304,8 +306,8 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                         }
                         # server local-chat notice arrives before the player's own message
                         # and triggers the agent with nothing to answer
-                        if not (msgDict["user"] or "").strip() and (
-                            msgDict["msg"] or ""
+                        if not (msgDict["user"] or "").strip() and _MC_FORMAT_CODE.sub(
+                            "", msgDict["msg"] or ""
                         ).strip().startswith(IGNORED_SERVER_MSGS):
                             return msgMas
                         # pre, rank, user, msg, clan, team, server, serverMode, chat_type, precision

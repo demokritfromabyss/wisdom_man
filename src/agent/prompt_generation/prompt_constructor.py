@@ -149,8 +149,6 @@ class UserInfo:
         if self.name == SELF_NAME or (self.mc_player_status and self.name == SELF_MC_NAME):
             is_self = True
             lines.append(f"!! is yourself, {self.name} !!")
-        elif CharacterManager.get_main_character().is_ai_character(self.name):
-            lines.append("AI character (another bot persona, not a human)")
 
         # Add user summary if available
         if self.chat_mentioned:

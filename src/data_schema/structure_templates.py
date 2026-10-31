@@ -20,6 +20,7 @@ THOUGHTS_FORMAT = {
     "restricted_topics": "the restricted topics that we should NOT TO TALK AND REPEAT anymore. Need to include all old topics (we should not repeat older topics). Example: game agent, hobbyhorsing, etc.",
     "plan": "1. Divided with numbers and separated by sentences. 2. List that conveys. N. Represents your current strategy.",
     "criticism": " Short and constructive self-criticism",
+    "pattern": "current answer manner: llm_answer / greeting / joking / commenting / crazy",
 }
 
 
