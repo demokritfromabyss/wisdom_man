@@ -12,6 +12,7 @@ import traceback
 from typing import Dict, TypedDict
 
 from agent.tools import tools_config
+from character.character_manager import CharacterManager
 from agent.tools.control_tools import (
     _add_tool_error_log,
     _add_tool_event_waiter,
@@ -24,6 +25,8 @@ from utils.minecraft_helper import PlayerStatus, get_nearby_players
 from utils.yaml_utils import YamlReader
 
 queue_send = tools_config.queue_send
+
+SELF_NAME = CharacterManager.get_main_character().get_names().Minecraft
 
 TASK_COMMANDS_MAP = {
     "askpeace": "gesture",
@@ -409,6 +412,16 @@ def agent_action(action: str) -> bool:
                     _add_tool_result_log(
                         "agent_action",
                         {"returned": "Agent action not sent", "call_id": call_id},
+                    )
+                    return False
+                # Shared account: own nick shows up as a player "IN YOU", don't attack it
+                if command_name in ("pursue", "punk") and SELF_NAME.lower() in [
+                    a.lower() for a in final_split[1:]
+                ]:
+                    print(f"[MC ACT TOOL] REFUSED {command_name} ON SELF ({SELF_NAME})")
+                    _add_tool_result_log(
+                        "agent_action",
+                        {"returned": "That nick is you, can't attack yourself", "call_id": call_id},
                     )
                     return False
 

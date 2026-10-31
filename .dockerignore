@@ -1,0 +1,9 @@
+# keep docker build context small (root-context images only need a few files)
+.venv
+.git
+data
+docs
+tests
+**/__pycache__
+.env
+.env.*

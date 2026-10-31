@@ -1,9 +1,11 @@
 # TODO refactor this
+import collections
 import copy
 import logging
 import multiprocessing
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -28,6 +30,33 @@ logger.setLevel(logging.FATAL)
 
 character = CharacterManager.get_main_character()
 SELF_NAME = character.get_names().Minecraft
+# server notices without author that should not reach the agent
+IGNORED_SERVER_MSGS = ("Nobody heard you",)
+
+# Agent's own chat lines, to recognise their echo when the agent and the
+# player share one Minecraft account (server may strip punctuation / cut text)
+_recent_sent = collections.deque(maxlen=20)
+ECHO_WINDOW_SEC = 60
+
+
+def _words(text: str) -> list:
+    return re.findall(r"\w+", str(text).lower())
+
+
+def _remember_sent(text: str):
+    _recent_sent.append((time.time(), set(_words(text))))
+
+
+def _is_own_echo(text: str) -> bool:
+    words = _words(text)
+    if not words:
+        return False
+    now = time.time()
+    for sent_at, sent_words in _recent_sent:
+        if now - sent_at < ECHO_WINDOW_SEC:
+            if sum(w in sent_words for w in words) / len(words) >= 0.8:
+                return True
+    return False
 
 
 def chat_queue_handler(
@@ -198,6 +227,7 @@ def chat_queue_handle(mc, ctx_swarm):
                                 # potentially DANGEROUS if SYMBOL LIMIT exceeds
                                 # not precize, need precize options for another modes
                                 mc.ChatMessage(chat_msg)
+                                _remember_sent(chat_msg)
                                 # print("FJSKG SDJG JFK GHJKFD JHFDJKH")
                                 ctx_game["mc_last_chat_interact"] = eztime()
                     else:
@@ -272,6 +302,12 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                             "user": msgMas.get("user", ""),
                             "msg": msgMas.get("msg", ""),
                         }
+                        # server local-chat notice arrives before the player's own message
+                        # and triggers the agent with nothing to answer
+                        if not (msgDict["user"] or "").strip() and (
+                            msgDict["msg"] or ""
+                        ).strip().startswith(IGNORED_SERVER_MSGS):
+                            return msgMas
                         # pre, rank, user, msg, clan, team, server, serverMode, chat_type, precision
                         fields = [
                             "pre",
@@ -521,7 +557,9 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                             username = msg.get("user", "")
                             if not username:
                                 username = ""
-                            if character.is_character_alias(username):
+                            if character.is_character_alias(username) or (
+                                username == SELF_NAME and _is_own_echo(msg["msg"])
+                            ):
                                 print(
                                     "Встречено собственное сообщение (тоже вносится)",
                                     username,
@@ -532,6 +570,10 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                                 msg["self"] = True
                                 ### ctx_chatOwn = ctx_chatOwn + [msg]
                                 # ctx_game["mc_last_chat_interact"] = eztime()
+                            if username == SELF_NAME:
+                                # player and agent share the account: hold agent's
+                                # reply for the queue cooldown so server antispam passes
+                                ctx_game["mc_last_chat_interact"] = eztime()
                             if True:
                                 # else:
 

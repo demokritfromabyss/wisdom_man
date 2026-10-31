@@ -12,6 +12,7 @@ Features:
 - Interrupt on new chat events
 """
 
+import os
 import time
 import traceback
 from typing import Any, Dict, List, Optional
@@ -128,6 +129,10 @@ class ChatAgent(BaseAgent):
             self.ctx_handler = ctx_handler
 
         self.llm = get_llm_chain()
+        # Optional second model for rate limits / provider errors (e.g. Groq per-model TPM)
+        fallback_name = os.getenv("CORE_LLM_FALLBACK_MODEL", "")
+        self.fallback_llm = get_llm_chain(fallback_name) if fallback_name and fallback_name != "NONE" else None
+        self.fallback_llm_with_tools = self.fallback_llm
         self.self_name = get_name()
 
         if tool_bank is not None:
@@ -182,6 +187,8 @@ class ChatAgent(BaseAgent):
         if available_tools:
             try:
                 self.llm_with_tools = self.llm.bind_tools(available_tools)
+                if self.fallback_llm is not None:
+                    self.fallback_llm_with_tools = self.fallback_llm.bind_tools(available_tools)
                 self._tools_supported = True
                 print(f"[CHAT AGENT] Native tool calling ON, {len(available_tools)} tools: {self._tool_names}")
                 if ENABLE_DEBUG_PRINT_TOOL_LIST:
@@ -387,8 +394,13 @@ class ChatAgent(BaseAgent):
         # Keep system message + last 2/3 of the rest
         rest = self._cached_prefix[1:]
         keep = min(len(rest) * 2 // 3, self._prefix_max_messages - 1)
-        removed = len(rest) - keep
-        self._cached_prefix = [self._cached_prefix[0]] + rest[-keep:]
+        kept = rest[-keep:]
+        # Cut may land between an AI tool call and its ToolMessage — start from
+        # the next HumanMessage so no orphaned tool results remain (Mistral 400)
+        first_human = next((i for i, m in enumerate(kept) if isinstance(m, HumanMessage)), 0)
+        kept = kept[first_human:]
+        removed = len(rest) - len(kept)
+        self._cached_prefix = [self._cached_prefix[0]] + kept
 
         # After trim, ensure first message after system is HumanMessage (Qwen requirement)
         if len(self._cached_prefix) > 1 and not isinstance(self._cached_prefix[1], HumanMessage):
@@ -552,6 +564,15 @@ class ChatAgent(BaseAgent):
                 if interrupted and len(response_text.strip()) < MIN_RESPONSE_LENGTH:
                     print(f"[CHAT AGENT] Discarding short interrupted response ({len(response_text.strip())} chars), retrying...")
                     continue
+
+                # Empty turn (no text, no tools) — keep it out of history,
+                # otherwise the model starts copying silent turns. Retry once.
+                if not response_text.strip() and not tool_calls:
+                    if tool_round == 1:
+                        print("[CHAT AGENT] Empty response, retrying...")
+                        continue
+                    print("[CHAT AGENT] Empty response again, giving up")
+                    break
 
                 # Append AI response to cached prefix (frozen for future calls)
                 self._cached_prefix.append(ai_message)
@@ -732,11 +753,14 @@ class ChatAgent(BaseAgent):
         except Exception as e:
             print(f"\n[CHAT AGENT] Stream error: {e}")
             traceback.print_exc()
-            # Try non-streaming invoke as last resort
+            # Try non-streaming invoke as last resort (on fallback model if configured)
+            if self.fallback_llm is not None:
+                llm = self.fallback_llm_with_tools if use_tools else self.fallback_llm
             try:
-                print("[CHAT AGENT] Trying non-streaming invoke...")
+                print("[CHAT AGENT] Trying non-streaming invoke"
+                      + (" on fallback model..." if self.fallback_llm is not None else "..."))
                 with _timer("LLM invoke fallback"):
-                    response = llm.invoke(messages)
+                    response = llm.invoke(messages, max_tokens=MAX_RESPONSE_TOKENS)
                 response_text = response.content or ""
                 print(f"[CHAT AGENT] {response_text}")
                 if hasattr(response, "tool_calls") and response.tool_calls:

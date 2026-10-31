@@ -7,3 +7,5 @@ services:
     ports:
       - "22231:22231"
     restart: on-failure
+    environment:
+      - SIMPLE_TTS_SPEAKER_ID=${SIMPLE_TTS_SPEAKER_ID:-1}

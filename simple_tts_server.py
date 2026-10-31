@@ -215,8 +215,8 @@ def predict(
         reference_audio = None
 
     try:
-        # Determine speaker ID
-        spk_id = 1
+        # Determine speaker ID (env default, overridden by reference_id)
+        spk_id = int(os.environ.get("SIMPLE_TTS_SPEAKER_ID", "1"))
         if reference_id:
             try:
                 spk_id = int(reference_id)

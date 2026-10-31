@@ -12,6 +12,12 @@ import signal
 import sys
 import time
 import traceback
+
+try:
+    import socketio  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    socketio = None
+
 from datetime import datetime
 from io import StringIO
 from multiprocessing import Manager, Process
@@ -31,6 +37,9 @@ def _log_timing(msg: str):
         process_name += "/" + str(os.getpid())
     print(f"[⏱️ {elapsed:7.3f}s] [{process_name}] {msg}")
 
+
+if socketio is not None:
+    _log_timing("socketio dependency available")
 
 _log_timing("System imports done. Starting main import sequence")
 

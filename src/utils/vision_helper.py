@@ -51,6 +51,7 @@ def get_obs_frame() -> str:
         print(f"[VISION HELPER] Error capturing OBS frame: {e}")
         img_data = ""
         using_obs = False
+        client = None  # reconnect next time (e.g. OBS was restarted)
     return img_data
 
 
