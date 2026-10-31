@@ -480,9 +480,12 @@ class ChatAgent(BaseAgent):
         # --- 1. Append new events to prefix ---
         with _timer("build prompt"):
             all_events = self.ctx_handler.get_ctx_chat(validate=True, dict_format=True, limit=50)
+            character = CharacterManager.get_main_character()
             new_events = [
                 e for e in all_events
                 if int(e.get("processing_timestamp", 0)) > self._last_event_ts
+                # IgnoredPlayers don't exist for the agent: their lines never reach the prompt
+                and not character.is_user_ignored(e.get("user", ""))
             ]
 
             if new_events:
