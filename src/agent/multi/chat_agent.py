@@ -52,6 +52,21 @@ from data_schema.tool_structures import SpeakEmotions, ToolBankType
 from utils.debug import print_messages
 
 SELF_NAME = get_name()
+SELF_MC_NAME = CharacterManager.get_main_character().get_names().Minecraft
+# Self-initiated walk to someone nearby; moves the game account, so it's a switch
+AUTO_ROAM = os.getenv("AUTO_ROAM", "FALSE").upper() == "TRUE"
+AUTO_ROAM_INTERVAL = float(os.getenv("AUTO_ROAM_INTERVAL", "90"))
+# Other AI personas wake the agent without a mention, but bot ping-pong is capped
+AI_REPLY_LIMIT = 3
+AI_REPLY_WINDOW = 60.0
+ROAM_PROMPT = (
+    "[Initiative: you've been standing around long enough. Look at the Players list "
+    f"('{SELF_MC_NAME}' is your own body, skip it). Pick someone: AI characters first, "
+    "then the closest player you haven't talked to recently. Walk to them with "
+    "agent_action '@follow <nick>', then say something to them in chat — a greeting, "
+    "a misquoted classic or an 'А вы знаете...?'. If nobody is listed, walk "
+    "somewhere 30-60 blocks away with '@goto X Y Z' and comment on the view.]"
+)
 MAX_TOOL_ROUNDS = 3
 MAX_RESPONSE_TOKENS = 500  # Hard limit on LLM generation per round
 ENABLE_DEBUG_PRINT_TOOL_LIST = True
@@ -165,6 +180,10 @@ class ChatAgent(BaseAgent):
         self._last_event_ts: int = 0  # timestamp of last processed event
         self._prefix_max_tokens: int = 15000  # trim when exceeded
         self._prefix_max_messages: int = 40  # hard limit on message count
+
+        # Initiative and AI-persona reply limiting
+        self._last_roam = time.time()
+        self._ai_replies: List[float] = []
 
         # Interrupt rate limiting
         self._last_interrupt_time = 0.0
@@ -288,6 +307,9 @@ class ChatAgent(BaseAgent):
                     f"\n⚠️ {trigger_event.user} wrote in GAME CHAT. "
                     f"They CANNOT hear your voice — call chat tool to reply so they see your answer!"
                 )
+        # Self-activation (idle, roam) events are not in ctx_chat — their text goes here
+        if trigger_event and trigger_event.type == "system" and not trigger_event.user:
+            base += "\n" + trigger_event.msg
         return base
 
     def _can_interrupt(self) -> bool:
@@ -818,8 +840,23 @@ class ChatAgent(BaseAgent):
                 result.append(HumanMessage(content=content))
         return result
 
+    def _allow_ai_reply(self) -> bool:
+        """At most AI_REPLY_LIMIT reactions to other bots per AI_REPLY_WINDOW."""
+        now = time.time()
+        self._ai_replies = [t for t in self._ai_replies if now - t < AI_REPLY_WINDOW]
+        if len(self._ai_replies) >= AI_REPLY_LIMIT:
+            return False
+        self._ai_replies.append(now)
+        return True
+
     def step(self):
         try:
+            if AUTO_ROAM and time.time() - self._last_roam >= AUTO_ROAM_INTERVAL:
+                print(f"[CHAT AGENT] Roam initiative ({AUTO_ROAM_INTERVAL:.0f}s)")
+                self._last_roam = time.time()
+                self._self_activate(ROAM_PROMPT, "roam_trigger")
+                return
+
             tracker = self.ctx_handler.activity_tracker
             t_wait_start = time.time()
             activity_level = tracker.level
@@ -831,6 +868,9 @@ class ChatAgent(BaseAgent):
                     return True
                 if interrupt_event_check(event):
                     return True
+                # Other AI personas: always worth a reply, within the ping-pong cap
+                if event.type == "chat" and CharacterManager.get_main_character().is_ai_character(event.user):
+                    return self._allow_ai_reply()
 
                 # Queue backlog (existing logic)
                 def check_timeout():
@@ -885,8 +925,12 @@ class ChatAgent(BaseAgent):
 
     def _handle_idle_activation(self):
         """Self-activate when nothing has happened for a while."""
+        self._self_activate("[Nothing is happening. You are idle and bored.]", "idle_trigger")
+
+    def _self_activate(self, msg: str, trigger_flag: str):
+        """Respond to a synthetic system event (idle, roam initiative)."""
         idle_event = CtxEventBase(
-            msg="[Nothing is happening. You are idle and bored.]",
+            msg=msg,
             user="",
             date="",
             processing_timestamp=time.time_ns(),
@@ -894,7 +938,7 @@ class ChatAgent(BaseAgent):
             env="minecraft",
             additional_fields={
                 "filter_results": {"acceptable": True},
-                "idle_trigger": True,
+                trigger_flag: True,
             },
         )
         self.ctx_handler.activity_tracker.reset_idle()

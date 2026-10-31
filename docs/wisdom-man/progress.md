@@ -9,7 +9,13 @@
 ## Запуск
 
 ```bash
-docker compose up -d          # db, redis, simple_tts, parakeet (см. docker-compose.override.yml)
+docker compose up -d          # db, redis, parakeet (simpletts в docker-compose.override.yml закомментирован)
+
+# голос: Qwen3-TTS на MLX, отдельное окружение (один раз)
+uv venv --python 3.12 ../qwen3-tts/.venv && source ../qwen3-tts/.venv/bin/activate
+uv pip install mlx-audio==0.6.3 gradio==6.30.0 soundfile scipy
+QWEN_TTS_PORT=22231 python qwen_tts_server.py    # первый запуск качает модель ~1.5 ГБ
+
 cd src && source ../.venv/bin/activate
 python main.py -cof           # ChatAgent, без Twitch, без фильтра
 ```
@@ -18,7 +24,9 @@ python main.py -cof           # ChatAgent, без Twitch, без фильтра
 
 В `.env`: `NETTYAN_CHARACTER_NAME="WisdomMan"`, `CORE_LLM_MODEL_NAME="mistral/mistral-medium-latest"`,
 `CORE_LLM_FALLBACK_MODEL="mistral/mistral-small-latest"`, `VISION_LLM_MODEL_NAME="mistral/mistral-medium-latest"`,
-`TTS_ENDPOINT_URL="http://127.0.0.1:22231/"`, `SIMPLE_TTS_SPEAKER_ID=3`.
+`TTS_ENDPOINT_URL="http://127.0.0.1:22231/"`, `AUTO_ROAM="TRUE"`, `AUTO_ROAM_INTERVAL=90`.
+
+Вместо Qwen можно вернуть лёгкий vosk: раскомментировать `docker-compose.simpletts.yml` в override и `SIMPLE_TTS_SPEAKER_ID=3`.
 
 ## Что работает (занятие 3, 24.10.2026)
 
@@ -42,10 +50,15 @@ python main.py -cof           # ChatAgent, без Twitch, без фильтра
 - **Удары по себе.** Агент и игрок пока на одном аккаунте, и свой ник агент видит как игрока «в 0 м, можно атаковать». Он отдавал `@strike` по себе. Теперь `agent_action` не выполняет `pursue`/`punk` по своему нику (`src/agent/tools/minecraft_tools.py`).
 - **Fish TTS нативно на Mac (M4, 16 ГБ, MPS).** Около 40 с на фразу (в Docker было 160 с). Для живой игры медленно, остаётся для записей или арендованной видеокарты. Клиент `src/tts/fish/fish_gr.py` шлёт `temperature=0.4`, а Fish 1.5.1 принимает минимум 0.6. Пока не исправлено.
 - Агент проверен на публичном сервере: видит игроков рядом и отвечает им в чате.
+- **Голос Qwen3-TTS.** `qwen_tts_server.py` — тот же Gradio-API `/partial`, что у Fish и simple_tts, поэтому агент не менялся. Модель `Qwen3-TTS-12Hz-1.7B-Base-6bit` через MLX клонирует голос по `Voice/*.wav` под каждую эмоцию. 4–10 с на фразу на M4 16 ГБ при запущенной игре (Fish было 40 с). Модель 0.6B на Маке медленнее (8 с), поэтому не используется.
+- **Свой ник в подсказке.** Агент помечал себя («!! is yourself !!») только по имени персонажа, а не по нику в игре, поэтому своё тело `guinplenn76` считал другим игроком.
+- **Другие персонажи.** `AICharacters` в `char_config.yml` (LastOrder01, ZeusThunderer). В списке игроков они помечены «AI character», будят агента без обращения по имени, но не чаще 3 раз в минуту, чтобы боты не заспамили чат. Как с ними говорить, описано в `personalities.yml`.
+- **Прогулки.** При `AUTO_ROAM="TRUE"` раз в `AUTO_ROAM_INTERVAL` секунд Мудрец сам выбирает, к кому подойти (сначала AI-персонажи), идёт через `@follow` и заговаривает. Пока аккаунт общий, это водит персонажа создателя, поэтому есть выключатель.
+- **Самоактивация молчала.** Текст системных событий (раньше «Nothing is happening…») не попадал в подсказку: `respond()` берёт историю из контекста, а триггер туда не пишется. Теперь он добавляется в напоминание в конце.
 
 ### Известные проблемы
 
-- Отдельного игрового аккаунта нет. Эхо своих сообщений отсекается, но агент путает себя с создателем.
+- Отдельного игрового аккаунта нет. Эхо своих сообщений отсекается, а прогулки водят персонажа создателя.
 - Латинские ники в исходящем чате портятся (`arcmlchikkk` → `arcmlкхиккк`).
 - Отвечает на вопросы, адресованные другим персонажам («Зевс, расскажи…»).
 - Практические факты иногда выдумывает (состав фейерверков).

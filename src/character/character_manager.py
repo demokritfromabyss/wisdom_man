@@ -91,6 +91,11 @@ class CharacterManager:
         config = self.get_character_config()
         return username in config.GodUsers
 
+    def is_ai_character(self, username: str) -> bool:
+        """True if username belongs to another AI persona (AICharacters in char_config)"""
+        config = self.get_character_config()
+        return bool(username) and username.lower() in [n.lower() for n in config.AICharacters]
+
     def read_character_prompt(self, personality_name: str = "streamer_abstract") -> str:
         """Загружает промпт для персонажа по имени персональности"""
         personalities_path = os.path.join(self.base_dir, "personalities.yml")

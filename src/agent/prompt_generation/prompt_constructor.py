@@ -72,6 +72,8 @@ from utils.vision_helper import get_actual_frame
 # TODO add to config general names that we EVERYTIME can easyly get
 
 SELF_NAME = get_name()
+# In-game nick differs from the display name (e.g. "Wisdom Man" plays as guinplenn76)
+SELF_MC_NAME = CharacterManager.get_main_character().get_names().Minecraft
 
 
 @dataclass
@@ -144,9 +146,11 @@ class UserInfo:
         lines = []
         game_lines = []
         is_self = False
-        if self.name == SELF_NAME:
+        if self.name == SELF_NAME or (self.mc_player_status and self.name == SELF_MC_NAME):
             is_self = True
             lines.append(f"!! is yourself, {self.name} !!")
+        elif CharacterManager.get_main_character().is_ai_character(self.name):
+            lines.append("AI character (another bot persona, not a human)")
 
         # Add user summary if available
         if self.chat_mentioned:

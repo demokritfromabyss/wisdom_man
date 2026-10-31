@@ -322,11 +322,11 @@ def predict(
         return None, f"<div style='color:red'>Synthesis failed: {e}</div>"
 
 
-def build_and_launch(server_name: str = "127.0.0.1", server_port: int = 22231):
+def build_and_launch(server_name: str = "127.0.0.1", server_port: int = 22231, predict_fn=predict):
     """Build the Gradio UI (only to expose the API endpoints) and launch the server.
 
     The UI contains components that match `FishTTSGradioKWArgs` but the synth uses
-    only the `text` input.
+    only the `text` input. Other engines (qwen_tts_server.py) pass their own `predict_fn`.
     """
 
     with gr.Blocks(title="FishTTS Gradio Emulator") as demo:
@@ -365,7 +365,7 @@ def build_and_launch(server_name: str = "127.0.0.1", server_port: int = 22231):
 
         generate_btn = gr.Button("Generate")
         generate_btn.click(
-            predict,
+            predict_fn,
             inputs=[
                 text_in,
                 normalize,
