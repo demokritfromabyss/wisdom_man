@@ -36,6 +36,32 @@ IGNORED_SERVER_MSGS = ("Nobody heard you", "[Tungsten]")
 _MC_FORMAT_CODE = re.compile(r"§.")
 _VANILLA_CHAT = re.compile(r"^<([A-Za-z0-9_]{2,16})>\s*(.+)$", re.S)
 
+# The mod's py4j gateway sometimes closes (after a reconnect / failed callbacks) and doesn't
+# come back until the game restarts. Its MCP server stays up, and re-setting the port there
+# restarts the gateway. Needs UNIONCLEF_MCP_TOKEN (mcpAuthToken from altoclef_settings.json)
+GATEWAY_REOPEN_AFTER = 6  # failed checks, 5 s apart
+
+
+def _reopen_gateway_via_mcp():
+    token = os.getenv("UNIONCLEF_MCP_TOKEN", "")
+    if not token:
+        return
+    url = os.getenv("UNIONCLEF_MCP_URL", "http://127.0.0.1:25350/mcp")
+    port = os.getenv("UNIONCLEF_GATEWAY_PORT", "25333")
+    try:
+        import requests
+
+        r = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "ExecuteCommand", "arguments": {"cmd": f"@set pythonGatewayPort {port}"}}},
+            timeout=5,
+        )
+        print("[minebridge] gateway down, asked the mod over MCP to restart it:", r.status_code)
+    except Exception as err:
+        print("[minebridge] MCP gateway restart failed:", err)
+
 # Agent's own chat lines, to recognise their echo when the agent and the
 # player share one Minecraft account (server may strip punctuation / cut text)
 _recent_sent = collections.deque(maxlen=20)
@@ -442,6 +468,8 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
 
             mc = java_gateway.entry_point
 
+            fails_in_row = [0]
+
             def ingame(loop=True):
                 if loop:
                     needLog = False
@@ -450,6 +478,7 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                         try:
                             ez = mc.inGame()
                             fail = False
+                            fails_in_row[0] = 0
                             if not ctx_game["mc_started"]:
                                 ctx_game["mc_started"] = True
                             if needLog:
@@ -465,6 +494,9 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                                 print("BRIDGE CONNECTION FAILED", err)
                             ctx_game["mc_started"] = False
                             ctx_game["ingame"] = False
+                            fails_in_row[0] += 1
+                            if fails_in_row[0] % GATEWAY_REOPEN_AFTER == 0:
+                                _reopen_gateway_via_mcp()
                             time.sleep(5)
                             # return False
                         finally:

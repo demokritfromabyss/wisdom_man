@@ -70,6 +70,17 @@ USER_REPLY_WINDOW = 60.0
 SERVER_REPEAT_WINDOW = 120.0  # identical server line within this doesn't wake the agent
 MOD_LINE_PREFIX = "§2§l§o"  # UnionClef / Alto Clef / Tungsten chat formatting
 PROTECTION_RE = re.compile(r"(?i)sorry, but you can't|you don't have permission|здесь нельзя|нет прав")
+# Docs scheme (see -> go -> act): in a quiet moment the model itself decides whether to walk
+# up to someone, go somewhere or stay silent. Seconds without any turn; 0 disables
+INITIATIVE_SEC = float(os.getenv("INITIATIVE_SEC", "30"))
+INITIATIVE_PROMPT = (
+    "[Quiet moment, nothing new happened. See -> go -> act: look at the Players list (who is near, "
+    "how far, what they hold), your body status and your plan, then choose ONE thing: walk up to "
+    "someone and talk to them (agent_action '@follow <nick>' + one chat line), go somewhere within "
+    "100 blocks of you ('@goto X Y Z'), answer something left unanswered, or stay silent and keep "
+    "doing what you do. If your body is already busy with a task, don't send a new move. "
+    "Bots and AI characters are players too.]"
+)
 ROAM_MEMORY = 4  # last visited players, skipped when choosing the next one
 ROAM_EXPLORE_DIST = (80, 150)  # blocks to walk when nobody new is around
 ROAM_STUCK_CHECKS = 3  # roams in a row ending within ROAM_STUCK_DIST blocks = stuck
@@ -200,6 +211,7 @@ class ChatAgent(BaseAgent):
         self._roam_positions: List[tuple] = []
         self._roam_went_far = False
         self._roam_stuck_count = 0
+        self._last_turn = time.time()  # last time the agent took a turn (event or own)
         self._auth_announced = False
         self._user_replies: Dict[str, List[float]] = {}
         self._server_lines_seen: Dict[str, float] = {}
@@ -309,6 +321,11 @@ class ChatAgent(BaseAgent):
         ]
         if own_state:
             parts.append("## Your current intentions (change with plan/focus/pattern tools):\n" + "\n".join(own_state))
+        game = self.ctx_swarm["game"]
+        if game.get("ingame"):
+            task = str(game.get("task_chain") or "").strip()
+            busy = "busy: " + task[:160] if game.get("hasActiveTask") and task else "idle, no task running"
+            parts.append(f"## Your body:\n{busy}")
         # parts = [
         #     f"# Current Situation:",
         #     f"## Game Status:\n{game_status}",
@@ -468,6 +485,7 @@ class ChatAgent(BaseAgent):
     def respond(self, trigger_event: CtxEventBase) -> str:
         if not self.initialized:
             return ""
+        self._last_turn = time.time()
         self._interrupts_this_call = 0
 
         # Rebuild system prompt if personality changed → full cache invalidation
@@ -938,6 +956,23 @@ class ChatAgent(BaseAgent):
             f"'@goto {gx} {int(y)} {gz}'. Say aloud what you expect to find there, in character.]"
         )
 
+    def _build_initiative_prompt(self) -> Optional[str]:
+        """Quiet-moment nudge. None when there's nothing to act on: not in game, or the
+        server waits for the creator's password (told once)."""
+        if self._auth_prompt_seen(self._recent_chat()):
+            if self._auth_announced:
+                return None
+            self._auth_announced = True
+            return (
+                "[The server is asking to log in (/l <password>): your body is frozen until then. "
+                "Do NOT type commands or guess passwords. Say once, aloud, to your creator that "
+                "the gates are shut. Then wait.]"
+            )
+        self._auth_announced = False
+        if not get_nearby_players(self.ctx_swarm).get(SELF_MC_NAME):
+            return None
+        return INITIATIVE_PROMPT + "\n" + self._character_idea()
+
     def _build_roam_prompt(self) -> Optional[str]:
         """Decide the next self-started move. None = stay put (not in game, waiting for
         login, already told the creator). Otherwise: walk up to the closest person not
@@ -1094,6 +1129,13 @@ class ChatAgent(BaseAgent):
             elif tracker.idle_seconds >= IDLE_SELF_ACTIVATE:
                 print(f"[CHAT AGENT ⏱️ waited {wait_elapsed:.1f}s] Idle self-activation ({tracker.idle_seconds:.0f}s idle)")
                 self._handle_idle_activation()
+            elif INITIATIVE_SEC > 0 and time.time() - self._last_turn >= INITIATIVE_SEC:
+                prompt = self._build_initiative_prompt()
+                if prompt:
+                    print(f"[CHAT AGENT ⏱️ waited {wait_elapsed:.1f}s] Initiative ({INITIATIVE_SEC:.0f}s quiet)")
+                    self._self_activate(prompt, "initiative_trigger")
+                else:
+                    self._last_turn = time.time()
             else:
                 print(f"[CHAT AGENT ⏱️ waited {wait_elapsed:.1f}s] No trigger (timeout, {activity_level})")
 
