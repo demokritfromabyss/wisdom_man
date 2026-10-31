@@ -67,6 +67,7 @@ AUTO_ROAM_INTERVAL = float(os.getenv("AUTO_ROAM_INTERVAL", "90"))
 USER_REPLY_LIMIT = 3
 USER_REPLY_WINDOW = 60.0
 SERVER_REPEAT_WINDOW = 120.0  # identical server line within this doesn't wake the agent
+MOD_LINE_PREFIX = "§2§l§o"  # UnionClef / Alto Clef / Tungsten chat formatting
 ROAM_MEMORY = 4  # last visited players, skipped when choosing the next one
 ROAM_EXPLORE_DIST = (80, 150)  # blocks to walk when nobody new is around
 ROAM_STUCK_CHECKS = 3  # roams in a row ending within ROAM_STUCK_DIST blocks = stuck
@@ -74,7 +75,7 @@ ROAM_STUCK_DIST = 2.0
 ROAM_STUCK_FAR = 6.0  # only moves towards targets further than this count
 # Login prompt from auth plugins: body frozen, inventory hidden until password is typed
 AUTH_PROMPT_RE = re.compile(r"(?i)(/l(ogin)?\b|/reg(ister)?\b|авториз|логинь|войдите|зарегистрир)")
-AUTH_DONE_RE = re.compile(r"(?i)(успешн|success|logged in|вы вошли|добро пожаловать|welcome)")
+AUTH_DONE_RE = re.compile(r"(?i)(успешн|success|logged in|вош[её]л|вошли|добро пожаловать|welcome)")
 AUTH_PAUSE_SEC = 300.0
 MAX_TOOL_ROUNDS = 3
 MAX_RESPONSE_TOKENS = 500  # Hard limit on LLM generation per round
@@ -1030,6 +1031,9 @@ class ChatAgent(BaseAgent):
                         return False
                     if CharacterManager.get_main_character().is_user_ignored(event.user):
                         return False
+                # Mod status lines ([Alto Clef], [Tungsten], pathfinder WARNING) are not events to talk about
+                if not event.user and str(event.msg).startswith(MOD_LINE_PREFIX):
+                    return False
                 # The same server line again ("can't break that block here" x20) is not news
                 if event.type == "chat" and not event.user:
                     now, key = time.time(), " ".join(str(event.msg).lower().split())

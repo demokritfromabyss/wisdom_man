@@ -28,6 +28,22 @@ queue_send = tools_config.queue_send
 
 _character = CharacterManager.get_main_character()
 SELF_NAME = _character.get_names().Minecraft
+MAX_GOTO_DIST = 300  # blocks from where we stand; further = made-up coordinates
+
+
+def _goto_too_far(coords: list) -> str:
+    """Refusal text if @goto target is far from our position, "" if fine or unknown."""
+    try:
+        gx, gz = float(coords[0]), float(coords[-1])
+        me = get_nearby_players(tools_config.ctx_swarm).get(SELF_NAME)
+        x, _, z = (float(v) for v in me["position"].split(","))
+    except Exception:
+        return ""
+    dist = ((gx - x) ** 2 + (gz - z) ** 2) ** 0.5
+    if dist > MAX_GOTO_DIST:
+        return (f"REFUSED: that point is {int(dist)} blocks away, you're at {int(x)} {int(z)}. "
+                f"Pick a point within {MAX_GOTO_DIST} blocks of where you stand.")
+    return ""
 
 TASK_COMMANDS_MAP = {
     "askpeace": "gesture",
@@ -425,6 +441,13 @@ def agent_action(action: str) -> bool:
                     reason = "REFUSED: you don't attack players, use words instead"
                     _add_tool_result_log("agent_action", {"returned": reason, "call_id": call_id})
                     return reason
+                # Invented far coordinates ("@goto 1 1 -1" from 1000 blocks away) — refuse
+                if command_name == "goto":
+                    far = _goto_too_far(final_split[1:])
+                    if far:
+                        print(f"[MC ACT TOOL] REFUSED goto: {far}")
+                        _add_tool_result_log("agent_action", {"returned": far, "call_id": call_id})
+                        return far
 
             if len(action) > 200:
                 action = action[:200]
