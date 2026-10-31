@@ -289,7 +289,10 @@ def get_users_info(
 
     # Process Minecraft players (highest base priority)
     nearby_players = get_nearby_players(ctx_swarm)
+    character = CharacterManager.get_main_character()
     for player_name, status in nearby_players.items():
+        if character.is_user_ignored(player_name):
+            continue  # IgnoredPlayers don't exist for the agent
         # Base priority: 50
         # +50 if focused
         # +20 if close (< 10m)

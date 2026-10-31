@@ -474,6 +474,12 @@ def agent_action(action: str) -> bool:
                     reason = "REFUSED: you don't attack players, use words instead"
                     _add_tool_result_log("agent_action", {"returned": reason, "call_id": call_id})
                     return reason
+                # Operator's IgnoredPlayers: no following or gesturing at them (one killed us)
+                if command_name != "avoid" and any(_character.is_user_ignored(t) for t in targets):
+                    reason = "REFUSED: stay away from that player, they're off-limits for you"
+                    print(f"[MC ACT TOOL] REFUSED {command_name} ON IGNORED {targets}")
+                    _add_tool_result_log("agent_action", {"returned": reason, "call_id": call_id})
+                    return reason
                 # Invented far coordinates ("@goto 1 1 -1" from 1000 blocks away) — refuse
                 if command_name == "goto":
                     far = _goto_too_far(final_split[1:])
@@ -481,6 +487,10 @@ def agent_action(action: str) -> bool:
                         print(f"[MC ACT TOOL] REFUSED goto: {far}")
                         _add_tool_result_log("agent_action", {"returned": far, "call_id": call_id})
                         return far
+                    # The model guesses Y (y=59 under the sea → drowned). Send X Z only:
+                    # the mod's GetToXZTask walks to the surface there
+                    if len(final_split) == 4:
+                        action = f"t goto {final_split[1]} {final_split[3]}"
 
             if len(action) > 200:
                 action = action[:200]
