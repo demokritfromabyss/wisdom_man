@@ -1,3 +1,4 @@
+import re
 import time
 import traceback
 from typing import Dict, List, Optional, Tuple
@@ -38,6 +39,21 @@ def mc_send(message: str) -> bool:
 # Same line again within this window is dropped: a stuck loop shouldn't spam the server chat
 CHAT_REPEAT_WINDOW = 120.0
 _recent_chat_sent: Dict[str, float] = {}
+CHAT_SIMILAR_WORDS = 0.6  # share of common words that makes two lines "the same thing"
+
+
+def _is_chat_repeat(key: str, now: float) -> bool:
+    """Exact or near-identical line (one word swapped) sent within CHAT_REPEAT_WINDOW."""
+    words = set(re.findall(r"\w+", key))
+    for sent, at in _recent_chat_sent.items():
+        if now - at >= CHAT_REPEAT_WINDOW:
+            continue
+        if sent == key:
+            return True
+        sent_words = set(re.findall(r"\w+", sent))
+        if words and sent_words and len(words & sent_words) / max(len(words), len(sent_words)) >= CHAT_SIMILAR_WORDS:
+            return True
+    return False
 
 
 def chat(message: str) -> bool:
@@ -59,7 +75,7 @@ def chat(message: str) -> bool:
     print("***GAME CHAT***", message)
     now = time.time()
     key = " ".join(str(message).lower().split())
-    if now - _recent_chat_sent.get(key, 0) < CHAT_REPEAT_WINDOW:
+    if _is_chat_repeat(key, now):
         print("***GAME CHAT*** REPEAT DROPPED")
         # A string, not False: the model sees the tool result and should stop re-sending
         reason = "NOT SENT: you already said exactly this, players have seen it. Don't repeat it; say something new or finish."
