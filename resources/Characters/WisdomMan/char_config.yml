@@ -16,3 +16,7 @@ GodUsers:
 
 # Never rude, never aggressive: refuses to chase or hit players
 Pacifist: true
+
+# Players he neither walks up to nor answers
+IgnoredPlayers:
+  - LastOrder01

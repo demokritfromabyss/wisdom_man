@@ -986,6 +986,7 @@ class ChatAgent(BaseAgent):
             p for name, p in near.items()
             if name != SELF_MC_NAME and name not in self._roam_visited
             and not self._waiting_for_reply(name, events)
+            and not CharacterManager.get_main_character().is_user_ignored(name)
         ]
         if candidates:
             target_p = min(candidates, key=lambda p: p.get("distance") or 1e9)
@@ -1023,6 +1024,8 @@ class ChatAgent(BaseAgent):
                 # One speaker can't keep the agent busy (bots ping-pong, spam), mentions included
                 if event.type == "chat" and event.user and not event.additional_fields.get("self", False):
                     if not self._allow_user_reply(event.user):
+                        return False
+                    if CharacterManager.get_main_character().is_user_ignored(event.user):
                         return False
                 # The same server line again ("can't break that block here" x20) is not news
                 if event.type == "chat" and not event.user:

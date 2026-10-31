@@ -91,6 +91,11 @@ class CharacterManager:
         config = self.get_character_config()
         return username in config.GodUsers
 
+    def is_user_ignored(self, username: str) -> bool:
+        """True if the operator put username into IgnoredPlayers (char_config)"""
+        config = self.get_character_config()
+        return bool(username) and username.lower() in [n.lower() for n in config.IgnoredPlayers]
+
     def read_character_prompt(self, personality_name: str = "streamer_abstract") -> str:
         """Загружает промпт для персонажа по имени персональности"""
         personalities_path = os.path.join(self.base_dir, "personalities.yml")

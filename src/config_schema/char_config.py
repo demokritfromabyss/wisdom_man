@@ -27,6 +27,8 @@ class CharacterConfig(BaseModel):
     GodUsers: List[str] = Field(default_factory=list)
     # Character never attacks players (refuses chase/strike actions)
     Pacifist: bool = False
+    # Players the character doesn't approach on roams and doesn't answer (operator's choice)
+    IgnoredPlayers: List[str] = Field(default_factory=list)
 
 
 class CharacterConfigManager:
