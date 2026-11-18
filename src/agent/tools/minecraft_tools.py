@@ -29,6 +29,14 @@ queue_send = tools_config.queue_send
 _character = CharacterManager.get_main_character()
 SELF_NAME = _character.get_names().Minecraft
 MAX_GOTO_DIST = 300  # blocks from where we stand; further = made-up coordinates
+# One move per agent turn: the model re-sent @goto every tool round and the mod re-planned
+# each time, never arriving. ChatAgent calls new_turn() at the start of each turn
+MOVE_COMMANDS = ("goto", "follow")
+_turn_move = {"sent": ""}
+
+
+def new_turn() -> None:
+    _turn_move["sent"] = ""
 
 
 
@@ -386,7 +394,7 @@ def agent_action(action: str) -> bool:
 
     Common actions:
         "@follow PlayerName" — walk to and follow a player
-        "@goto X Y Z" — walk to coordinates
+        "@goto X Z" — walk to a point (the mod finds the surface there)
         "@strike PlayerName" — attack a nearby player
         "@chase PlayerName" — pursue a player as main task
         "@avoid PlayerName" — run away from player
@@ -397,6 +405,7 @@ def agent_action(action: str) -> bool:
     """
     # , @status removed, agent not need it
     call_id = _add_tool_run_log("agent_action", {"action": action})
+    move = False
     try:
         action = action.strip()
         if action and len(action) > 0:
@@ -466,6 +475,13 @@ def agent_action(action: str) -> bool:
                     # the mod's GetToXZTask walks to the surface there
                     if len(final_split) == 4:
                         action = f"t goto {final_split[1]} {final_split[3]}"
+                move = command_name in MOVE_COMMANDS
+                if move and _turn_move["sent"]:
+                    reason = (f"REFUSED: your body is already on its way ({_turn_move['sent']}). "
+                              "No new move this turn; say one short line instead.")
+                    print(f"[MC ACT TOOL] REFUSED second move this turn: {action}")
+                    _add_tool_result_log("agent_action", {"returned": reason, "call_id": call_id})
+                    return reason
 
             if len(action) > 200:
                 action = action[:200]
@@ -486,6 +502,10 @@ def agent_action(action: str) -> bool:
             # )
             # TODO, need to check first output from autoclef logs
             # _add_tool_event_waiter
+            if move and result:
+                _turn_move["sent"] = "@" + action.removeprefix("t ")
+                return (f"Sent: your body is walking ({_turn_move['sent']}), the mod takes it there. "
+                        "Don't send another move this turn.")
             return result
     except Exception as e:
         _add_tool_error_log("agent_action", {"returned": str(e), "call_id": call_id})

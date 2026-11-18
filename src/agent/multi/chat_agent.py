@@ -38,6 +38,7 @@ from agent.prompt_generation.prompt_constructor import (
     get_users_info,
 )
 from agent.tools import tools_config
+from agent.tools.minecraft_tools import new_turn
 from agent.tools.status_tools import get_tool_status
 from character.character_manager import CharacterManager
 from config_schema.general import get_name
@@ -61,13 +62,15 @@ SELF_MC_NAME = CharacterManager.get_main_character().get_names().Minecraft
 # Replies to one speaker per window (GodUsers exempt): stops bot-to-bot ping-pong and spammers
 USER_REPLY_LIMIT = 3
 USER_REPLY_WINDOW = 60.0
-SERVER_REPEAT_WINDOW = 120.0  # identical server line within this doesn't wake the agent
+# Same server line (digits ignored: "3x items" / "8x items" cleanup notices) within this doesn't wake the agent
+SERVER_REPEAT_WINDOW = 600.0
 MOD_LINE_PREFIX = "§2§l§o"  # UnionClef / Alto Clef / Tungsten chat formatting
 PROTECTION_RE = re.compile(r"(?i)sorry, but you can't|you don't have permission|здесь нельзя|нет прав")
 # Docs scheme (see -> go -> act): in a quiet moment the model itself decides whether to walk
 # up to someone, go somewhere or stay silent. Seconds without any turn; 0 disables
 INITIATIVE_SEC = float(os.getenv("INITIATIVE_SEC", "30"))
 INITIATIVE_MAX_SEC = 300.0  # cap for the pause when quiet moments find nobody
+SEARCHED_MEMORY = 5  # spots where quiet moments found nobody, shown so the model goes elsewhere
 INITIATIVE_PROMPT = (
     "[Quiet moment, nothing new happened. See -> go -> act: look at the Players list (who is near, "
     "how far, what they hold), your body status and your plan, then choose ONE thing: walk up to "
@@ -197,6 +200,7 @@ class ChatAgent(BaseAgent):
         # Initiative and AI-persona reply limiting
         self._last_turn = time.time()  # last time the agent took a turn (event or own)
         self._initiative_wait = INITIATIVE_SEC  # grows while quiet moments lead nowhere
+        self._searched_spots: List[str] = []  # "x z" where we were alone
         self._auth_announced = False
         self._user_replies: Dict[str, List[float]] = {}
         self._server_lines_seen: Dict[str, float] = {}
@@ -476,6 +480,7 @@ class ChatAgent(BaseAgent):
             return ""
         self._last_turn = time.time()
         self._interrupts_this_call = 0
+        new_turn()  # one move command per turn
 
         # Rebuild system prompt if personality changed → full cache invalidation
         current_personality = self.ctx_swarm["states"].get("personality", "streamer_abstract")
@@ -944,12 +949,24 @@ class ChatAgent(BaseAgent):
         if others:
             self._initiative_wait = INITIATIVE_SEC
             return INITIATIVE_PROMPT + "\n" + self._character_idea()
+        if self.ctx_swarm["game"].get("hasActiveTask"):
+            return None  # still walking somewhere: let the mod get there first
         # Alone: each quiet moment that finds nobody doubles the pause (no endless LLM chain)
         self._initiative_wait = min(self._initiative_wait * 2, INITIATIVE_MAX_SEC)
+        try:
+            x, _, z = (int(float(v)) for v in near[SELF_MC_NAME]["position"].split(","))
+            here = f"{x} {z}"
+        except Exception:
+            here = ""
+        been = "; ".join(self._searched_spots)
+        if here:
+            self._searched_spots = (self._searched_spots + [here])[-SEARCHED_MEMORY:]
         return (
-            "[Quiet moment and nobody around you. Go find people: agent_action '@goto X Z' to a point "
-            "40-120 blocks away from where you stand, in a direction you haven't been. Say aloud, in "
-            "character, where you're heading. Don't shuffle a few blocks back and forth.]"
+            f"[Quiet moment and nobody around you (you stand at {here or 'unknown'}). Go find people: "
+            "agent_action '@goto X Z' to a point 40-120 blocks away"
+            + (f", farther from where you already looked and found nobody: {been}" if been else "")
+            + ". One move only. Say one short line in character about what you hope to find; "
+            "no coordinates, no compass directions.]"
         )
 
     def step(self):
@@ -973,7 +990,7 @@ class ChatAgent(BaseAgent):
                     return False
                 # The same server line again ("can't break that block here" x20) is not news
                 if event.type == "chat" and not event.user:
-                    now, key = time.time(), " ".join(str(event.msg).lower().split())
+                    now, key = time.time(), " ".join(re.sub(r"\d+", "#", str(event.msg).lower()).split())
                     seen = self._server_lines_seen.get(key, 0)
                     self._server_lines_seen[key] = now
                     if now - seen < SERVER_REPEAT_WINDOW:
