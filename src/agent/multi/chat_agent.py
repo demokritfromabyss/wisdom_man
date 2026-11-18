@@ -72,6 +72,10 @@ INITIATIVE_SEC = float(os.getenv("INITIATIVE_SEC", "30"))
 # Every voice line also goes to game chat (players and viewers see what was said)
 VOICE_TO_CHAT = os.getenv("VOICE_TO_CHAT", "TRUE").upper() == "TRUE"
 VOICE_TO_CHAT_MAX = 200  # chars; server chat line limit is 256
+# A voice line is short and tagged *emotion*. Untagged long text or anything huge is the
+# model's planning leaking out ("Let me analyze... 1. position..."), not something to say
+SPEECH_MAX_UNTAGGED = 200
+SPEECH_MAX = 400
 INITIATIVE_MAX_SEC = 300.0  # cap for the pause when quiet moments find nobody
 SEARCHED_MEMORY = 5  # spots where quiet moments found nobody, shown so the model goes elsewhere
 INITIATIVE_PROMPT = (
@@ -692,8 +696,9 @@ class ChatAgent(BaseAgent):
                 # After tool results, Qwen requires HumanMessage before next assistant turn
                 last = tool_round + 1 >= MAX_TOOL_ROUNDS
                 self._cached_prefix.append(
-                    HumanMessage(content="Tools executed. Now finish: one short voice line in character, "
-                                         "text *emotion*, no more tools." if last else
+                    HumanMessage(content="Tools executed. Now finish with the line itself only: one short "
+                                         "sentence in character, in Russian, then *emotion*. No analysis, "
+                                         "no lists, no coordinates, no tools." if last else
                                  "Tools executed. Continue or finish with voice *emotion*.")
                 )
 
@@ -748,6 +753,9 @@ class ChatAgent(BaseAgent):
             from agent.tools.base_tools import _parse_emotion, voice_send
 
             emotion, clean_text = _parse_emotion(text)
+            if len(clean_text) > SPEECH_MAX or (not emotion and len(clean_text) > SPEECH_MAX_UNTAGGED):
+                print(f"[CHAT AGENT] Not spoken: looks like reasoning, not a line ({len(clean_text)} chars)")
+                return
 
             # Validate emotion — if not in allowed set, default to neutral
             if not emotion or emotion not in SpeakEmotions:
