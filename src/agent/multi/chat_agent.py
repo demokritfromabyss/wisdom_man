@@ -681,8 +681,11 @@ class ChatAgent(BaseAgent):
                     break
 
                 # After tool results, Qwen requires HumanMessage before next assistant turn
+                last = tool_round + 1 >= MAX_TOOL_ROUNDS
                 self._cached_prefix.append(
-                    HumanMessage(content="Tools executed. Continue or finish with voice *emotion*.")
+                    HumanMessage(content="Tools executed. Now finish: one short voice line in character, "
+                                         "text *emotion*, no more tools." if last else
+                                 "Tools executed. Continue or finish with voice *emotion*.")
                 )
 
         except Exception as e:
