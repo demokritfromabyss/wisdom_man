@@ -13,9 +13,7 @@ Features:
 """
 
 import json
-import math
 import os
-import random
 import re
 import time
 import traceback
@@ -56,14 +54,10 @@ from data_schema.ctx_structures import CtxSwarmType
 from data_schema.structure_templates import THOUGHTS_FORMAT
 from data_schema.tool_structures import SpeakEmotions, ToolBankType
 from utils.debug import print_messages
-from agent.tools.minecraft_tools import add_trap
 from utils.minecraft_helper import get_nearby_players
 
 SELF_NAME = get_name()
 SELF_MC_NAME = CharacterManager.get_main_character().get_names().Minecraft
-# Self-initiated walk to someone nearby; moves the game account, so it's a switch
-AUTO_ROAM = os.getenv("AUTO_ROAM", "FALSE").upper() == "TRUE"
-AUTO_ROAM_INTERVAL = float(os.getenv("AUTO_ROAM_INTERVAL", "90"))
 # Replies to one speaker per window (GodUsers exempt): stops bot-to-bot ping-pong and spammers
 USER_REPLY_LIMIT = 3
 USER_REPLY_WINDOW = 60.0
@@ -78,15 +72,10 @@ INITIATIVE_PROMPT = (
     "[Quiet moment, nothing new happened. See -> go -> act: look at the Players list (who is near, "
     "how far, what they hold), your body status and your plan, then choose ONE thing: walk up to "
     "someone and talk to them (agent_action '@follow <nick>' + one chat line), go somewhere within "
-    "100 blocks of you ('@goto X Y Z'), answer something left unanswered, or stay silent and keep "
+    "100 blocks of you ('@goto X Z'), answer something left unanswered, or stay silent and keep "
     "doing what you do. If your body is already busy with a task, don't send a new move. "
     "Bots and AI characters are players too.]"
 )
-ROAM_MEMORY = 4  # last visited players, skipped when choosing the next one
-ROAM_EXPLORE_DIST = (80, 150)  # blocks to walk when nobody new is around
-ROAM_STUCK_CHECKS = 3  # roams in a row ending within ROAM_STUCK_DIST blocks = stuck
-ROAM_STUCK_DIST = 2.0
-ROAM_STUCK_FAR = 6.0  # only moves towards targets further than this count
 # Login prompt from auth plugins: body frozen, inventory hidden until password is typed
 AUTH_PROMPT_RE = re.compile(r"(?i)(/l(ogin)?\b|/reg(ister)?\b|авториз|логинь|войдите|зарегистрир)")
 AUTH_DONE_RE = re.compile(r"(?i)(успешн|success|logged in|вош[её]л|вошли|добро пожаловать|welcome)")
@@ -206,12 +195,6 @@ class ChatAgent(BaseAgent):
         self._prefix_max_messages: int = 40  # hard limit on message count
 
         # Initiative and AI-persona reply limiting
-        self._last_roam = time.time()
-        self._roam_visited: List[str] = []
-        self._roam_addressed: Dict[str, int] = {}  # nick -> ns when we walked up to talk
-        self._roam_positions: List[tuple] = []
-        self._roam_went_far = False
-        self._roam_stuck_count = 0
         self._last_turn = time.time()  # last time the agent took a turn (event or own)
         self._initiative_wait = INITIATIVE_SEC  # grows while quiet moments lead nowhere
         self._auth_announced = False
@@ -364,7 +347,7 @@ class ChatAgent(BaseAgent):
                     f"\n⚠️ {trigger_event.user} wrote in GAME CHAT. "
                     f"They CANNOT hear your voice — call chat tool to reply so they see your answer!"
                 )
-        # Self-activation (idle, roam) events are not in ctx_chat — their text goes here
+        # Self-activation (idle, initiative) events are not in ctx_chat — their text goes here
         if trigger_event and trigger_event.type == "system" and not trigger_event.user:
             base += "\n" + trigger_event.msg
         return base
@@ -941,27 +924,6 @@ class ChatAgent(BaseAgent):
         last = max(auth_lines, key=lambda ev: int(ev.get("processing_timestamp", 0)))
         return not AUTH_DONE_RE.search(str(last.get("msg", "")))
 
-    def _waiting_for_reply(self, user: str, events: List[dict]) -> bool:
-        """We walked up and talked to them, and they haven't said a word since."""
-        addressed_at = self._roam_addressed.get(user)
-        if not addressed_at:
-            return False
-        heard = [
-            int(ev.get("processing_timestamp", 0)) for ev in events
-            if ev.get("user") == user and ev.get("type") in ("chat", "voice")
-        ]
-        return not heard or max(heard) < addressed_at
-
-    def _explore_prompt(self, x: float, y: float, z: float, reason: str) -> str:
-        angle = random.uniform(0, 2 * math.pi)
-        dist = random.uniform(*ROAM_EXPLORE_DIST)
-        gx, gz = int(x + dist * math.cos(angle)), int(z + dist * math.sin(angle))
-        self._roam_visited = []  # new area, everyone is new again
-        return (
-            f"[Initiative: {reason} Go explore to find people: agent_action "
-            f"'@goto {gx} {int(y)} {gz}'. Say aloud what you expect to find there, in character.]"
-        )
-
     def _build_initiative_prompt(self) -> Optional[str]:
         """Quiet-moment nudge. None when there's nothing to act on: not in game, or the
         server waits for the creator's password (told once)."""
@@ -990,89 +952,8 @@ class ChatAgent(BaseAgent):
             "character, where you're heading. Don't shuffle a few blocks back and forth.]"
         )
 
-    def _build_roam_prompt(self) -> Optional[str]:
-        """Decide the next self-started move. None = stay put (not in game, waiting for
-        login, already told the creator). Otherwise: walk up to the closest person not
-        visited recently and not ignoring us, or explore when stuck / nobody new around."""
-        events = self._recent_chat()
-        if self._auth_prompt_seen(events):
-            if self._auth_announced:
-                return None
-            self._auth_announced = True
-            return (
-                "[You can't move: the server is asking to log in (/l <password>), your body "
-                "is frozen and the inventory hidden until then. Do NOT type any command and "
-                "don't guess passwords. Say once, aloud, to your creator that the gates are "
-                "shut and only the password opens them. Then wait.]"
-            )
-        self._auth_announced = False
-
-        near = get_nearby_players(self.ctx_swarm)
-        me = near.get(SELF_MC_NAME)
-        if not me:
-            return None
-        try:
-            x, y, z = (float(v) for v in me["position"].split(","))
-        except Exception:
-            return None
-
-        # Stuck: moves towards far targets left us within a couple of blocks — change
-        # direction, don't repeat. A chat with someone standing next to us isn't being stuck
-        if self._roam_went_far:
-            self._roam_positions = (self._roam_positions + [(x, z)])[-ROAM_STUCK_CHECKS:]
-        else:
-            self._roam_positions = []
-        self._roam_went_far = True  # explore always goes far; a near target resets it below
-        if self._roam_positions and math.dist(self._roam_positions[0], (x, z)) >= ROAM_STUCK_DIST:
-            self._roam_stuck_count = 0  # we did get somewhere
-        if len(self._roam_positions) == ROAM_STUCK_CHECKS and all(
-            math.dist(p, (x, z)) < ROAM_STUCK_DIST for p in self._roam_positions
-        ):
-            self._roam_positions = []
-            self._roam_stuck_count += 1
-            add_trap(x, y, z)  # don't walk back here later, even after a restart
-            if self._roam_stuck_count >= 2:
-                # Walking doesn't help (pit, fence, protected area) — stop dragging the body around
-                self._roam_stuck_count = 0
-                return (
-                    "[You're trapped: several walks in different directions didn't move you at all "
-                    "(pit, walls or a protected area). Stop walking for now. Say once, aloud, to your "
-                    "creator that you're trapped and need a hand, in character. Don't type commands.]"
-                )
-            return self._explore_prompt(x, y, z, "you've been stuck in one spot for a while, the last moves didn't get you anywhere.")
-
-        candidates = [
-            p for name, p in near.items()
-            if name != SELF_MC_NAME and name not in self._roam_visited
-            and not self._waiting_for_reply(name, events)
-            and not CharacterManager.get_main_character().is_user_ignored(name)
-        ]
-        if candidates:
-            target_p = min(candidates, key=lambda p: p.get("distance") or 1e9)
-            target = target_p["name"]
-            self._roam_went_far = (target_p.get("distance") or 0) > ROAM_STUCK_FAR
-            self._roam_visited = (self._roam_visited + [target])[-ROAM_MEMORY:]
-            self._roam_addressed[target] = time.time_ns()
-            return (
-                f"[Initiative: go hang out with {target}. Walk up with agent_action "
-                f"'@follow {target}', then talk to them: one chat line, plus a voice line. "
-                "If you haven't met before, greet them and ask one short question. "
-                "Treat them by the role they've earned (newcomer, debater, ...). "
-                f"You'll move on to someone else later.]\n{self._character_idea()}"
-            )
-        return self._explore_prompt(x, y, z, "nobody new around (or they haven't answered you yet).")
-
     def step(self):
         try:
-            if AUTO_ROAM and time.time() - self._last_roam >= AUTO_ROAM_INTERVAL:
-                self._last_roam = time.time()
-                roam_prompt = self._build_roam_prompt()
-                if roam_prompt:
-                    print(f"[CHAT AGENT] Roam initiative: {roam_prompt[:90]}")
-                    self._self_activate(roam_prompt, "roam_trigger")
-                    return
-                print("[CHAT AGENT] Roam skipped: not in game or waiting for login")
-
             tracker = self.ctx_handler.activity_tracker
             t_wait_start = time.time()
             activity_level = tracker.level
@@ -1168,7 +1049,7 @@ class ChatAgent(BaseAgent):
         )
 
     def _self_activate(self, msg: str, trigger_flag: str):
-        """Respond to a synthetic system event (idle, roam initiative)."""
+        """Respond to a synthetic system event (idle, initiative)."""
         idle_event = CtxEventBase(
             msg=msg,
             user="",
