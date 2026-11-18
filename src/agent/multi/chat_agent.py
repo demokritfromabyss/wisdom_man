@@ -626,9 +626,11 @@ class ChatAgent(BaseAgent):
                 # Rebuild lc_messages: frozen prefix + tail
                 lc_messages = self._cached_prefix + [tail_msg]
 
+                # Last round without tools: otherwise the model can spend every round on
+                # tool calls (repeated @goto) and the turn ends with nothing said
                 with _timer(f"LLM stream (tool round {tool_round})"):
                     response_text, tool_calls, ai_message, interrupted = self._stream_response(
-                        lc_messages, event_waiter, use_tools=True
+                        lc_messages, event_waiter, use_tools=tool_round < MAX_TOOL_ROUNDS
                     )
 
                 # If interrupted with too little text — discard and retry
