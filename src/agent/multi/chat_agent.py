@@ -69,6 +69,9 @@ PROTECTION_RE = re.compile(r"(?i)sorry, but you can't|you don't have permission|
 # Docs scheme (see -> go -> act): in a quiet moment the model itself decides whether to walk
 # up to someone, go somewhere or stay silent. Seconds without any turn; 0 disables
 INITIATIVE_SEC = float(os.getenv("INITIATIVE_SEC", "30"))
+# Every voice line also goes to game chat (players and viewers see what was said)
+VOICE_TO_CHAT = os.getenv("VOICE_TO_CHAT", "TRUE").upper() == "TRUE"
+VOICE_TO_CHAT_MAX = 200  # chars; server chat line limit is 256
 INITIATIVE_MAX_SEC = 300.0  # cap for the pause when quiet moments find nobody
 SEARCHED_MEMORY = 5  # spots where quiet moments found nobody, shown so the model goes elsewhere
 INITIATIVE_PROMPT = (
@@ -764,9 +767,26 @@ class ChatAgent(BaseAgent):
             # NOTE: no _add_tool_run_log here — AI response is already in _cached_prefix.
             # Logging speak to ctx_chat would create a duplicate AIMessage in prefix.
             voice_send([{"text": clean_text, "emotion": emotion}])
+            if VOICE_TO_CHAT and self.ctx_swarm["game"].get("ingame"):
+                self._mirror_to_chat(clean_text)
         except Exception as e:
             print(f"[CHAT AGENT] Speech send error: {e}")
             traceback.print_exc()
+
+    def _mirror_to_chat(self, text: str):
+        """Voice line duplicated to game chat. Skipped when the model already wrote the
+        same thing with the chat tool (shared repeat guard), so nothing shows twice."""
+        from agent.tools.base_tools import _is_chat_repeat, _recent_chat_sent, mc_send
+
+        line = " ".join(text.split())[:VOICE_TO_CHAT_MAX]
+        key = " ".join(line.lower().split())
+        now = time.time()
+        if not line or _is_chat_repeat(key, now):
+            print("[CHAT AGENT] Voice line not mirrored to chat (already there)")
+            return
+        _recent_chat_sent[key] = now
+        print(f"[CHAT AGENT] 💬 voice -> chat: {line}")
+        mc_send(line)
 
     def _stream_response(
         self,
@@ -840,7 +860,10 @@ class ChatAgent(BaseAgent):
                 response_text = response.content or ""
                 print(f"[CHAT AGENT] {response_text}")
                 if hasattr(response, "tool_calls") and response.tool_calls:
-                    tool_calls = response.tool_calls
+                    if not use_tools:
+                        response = AIMessage(content=response_text)
+                    else:
+                        tool_calls = response.tool_calls
                 return response_text, tool_calls, response, False
             except Exception as e2:
                 print(f"[CHAT AGENT] Invoke also failed: {e2}")
@@ -861,6 +884,11 @@ class ChatAgent(BaseAgent):
         ai_message = self._merge_chunks(chunks, response_text)
         if use_tools and hasattr(ai_message, "tool_calls") and ai_message.tool_calls:
             tool_calls = ai_message.tool_calls
+        elif getattr(ai_message, "tool_calls", None):
+            # Mistral may emit a tool call even with no tools bound; nothing runs it, and an
+            # unanswered call in history makes every next request fail (400). Keep the text only
+            print(f"[CHAT AGENT] Dropped {len(ai_message.tool_calls)} tool call(s) from a no-tools round")
+            ai_message = AIMessage(content=ai_message.content or response_text)
 
         return response_text, tool_calls, ai_message, was_interrupted
 
