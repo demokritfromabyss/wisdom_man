@@ -167,6 +167,10 @@ class ChatAgent(BaseAgent):
         fallback_name = os.getenv("CORE_LLM_FALLBACK_MODEL", "")
         self.fallback_llm = get_llm_chain(fallback_name) if fallback_name and fallback_name != "NONE" else None
         self.fallback_llm_with_tools = self.fallback_llm
+        # Tools visible but calls forbidden (tool_choice="none"): history has tool calls, and
+        # with no tools bound at all Mistral still emits them instead of the voice line
+        self.llm_no_tool_calls = self.llm
+        self.fallback_llm_no_tool_calls = self.fallback_llm
         self.self_name = get_name()
 
         if tool_bank is not None:
@@ -229,8 +233,10 @@ class ChatAgent(BaseAgent):
         if available_tools:
             try:
                 self.llm_with_tools = self.llm.bind_tools(available_tools)
+                self.llm_no_tool_calls = self.llm.bind_tools(available_tools, tool_choice="none")
                 if self.fallback_llm is not None:
                     self.fallback_llm_with_tools = self.fallback_llm.bind_tools(available_tools)
+                    self.fallback_llm_no_tool_calls = self.fallback_llm.bind_tools(available_tools, tool_choice="none")
                 self._tools_supported = True
                 print(f"[CHAT AGENT] Native tool calling ON, {len(available_tools)} tools: {self._tool_names}")
                 if ENABLE_DEBUG_PRINT_TOOL_LIST:
@@ -806,7 +812,7 @@ class ChatAgent(BaseAgent):
         chunks = []
         was_interrupted = False
 
-        llm = self.llm_with_tools if use_tools else self.llm
+        llm = self.llm_with_tools if use_tools else self.llm_no_tool_calls
 
         print("[CHAT AGENT] ", end="", flush=True)
         t_first_token = time.time()
@@ -851,7 +857,7 @@ class ChatAgent(BaseAgent):
             traceback.print_exc()
             # Try non-streaming invoke as last resort (on fallback model if configured)
             if self.fallback_llm is not None:
-                llm = self.fallback_llm_with_tools if use_tools else self.fallback_llm
+                llm = self.fallback_llm_with_tools if use_tools else self.fallback_llm_no_tool_calls
             try:
                 print("[CHAT AGENT] Trying non-streaming invoke"
                       + (" on fallback model..." if self.fallback_llm is not None else "..."))
