@@ -39,6 +39,7 @@ from agent.prompt_generation.prompt_constructor import (
 )
 from agent.tools import tools_config
 from agent.tools.minecraft_tools import new_turn
+from agent.tools.base_tools import new_chat_turn
 from agent.tools.status_tools import get_tool_status
 from character.character_manager import CharacterManager
 from config_schema.general import get_name
@@ -494,6 +495,7 @@ class ChatAgent(BaseAgent):
         self._last_turn = time.time()
         self._interrupts_this_call = 0
         new_turn()  # one move command per turn
+        new_chat_turn()  # one chat line per turn
 
         # Rebuild system prompt if personality changed → full cache invalidation
         current_personality = self.ctx_swarm["states"].get("personality", "streamer_abstract")
@@ -790,14 +792,18 @@ class ChatAgent(BaseAgent):
     def _mirror_to_chat(self, text: str):
         """Voice line duplicated to game chat. Skipped when the model already wrote the
         same thing with the chat tool (shared repeat guard), so nothing shows twice."""
-        from agent.tools.base_tools import _is_chat_repeat, _recent_chat_sent, mc_send
+        from agent.tools.base_tools import _is_chat_repeat, _recent_chat_sent, _turn_chat, mc_send
 
         line = " ".join(text.split())[:VOICE_TO_CHAT_MAX]
         key = " ".join(line.lower().split())
         now = time.time()
+        if _turn_chat["sent"]:
+            print("[CHAT AGENT] Voice line not mirrored to chat (one chat line per turn, already sent)")
+            return
         if not line or _is_chat_repeat(key, now):
             print("[CHAT AGENT] Voice line not mirrored to chat (already there)")
             return
+        _turn_chat["sent"] = line
         _recent_chat_sent[key] = now
         print(f"[CHAT AGENT] 💬 voice -> chat: {line}")
         mc_send(line)

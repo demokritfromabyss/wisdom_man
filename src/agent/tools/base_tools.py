@@ -42,6 +42,15 @@ _recent_chat_sent: Dict[str, float] = {}
 CHAT_SIMILAR_WORDS = 0.6  # share of common words that makes two lines "the same thing"
 
 
+# One chat line per agent turn (chat tool or voice mirrored to chat, whichever comes first):
+# on a global server chat several lines per turn read as spam
+_turn_chat = {"sent": ""}
+
+
+def new_chat_turn() -> None:
+    _turn_chat["sent"] = ""
+
+
 def _is_chat_repeat(key: str, now: float) -> bool:
     """Exact or near-identical line (one word swapped) sent within CHAT_REPEAT_WINDOW."""
     words = set(re.findall(r"\w+", key))
@@ -81,6 +90,13 @@ def chat(message: str) -> bool:
         reason = "NOT SENT: you already said exactly this, players have seen it. Don't repeat it; say something new or finish."
         _add_tool_result_log("chat", {"returned": reason, "call_id": call_id})
         return reason
+    if _turn_chat["sent"]:
+        print("***GAME CHAT*** SECOND LINE THIS TURN DROPPED")
+        reason = (f"NOT SENT: one chat message per turn, you already wrote: \"{_turn_chat['sent']}\". "
+                  "Finish with your voice line only.")
+        _add_tool_result_log("chat", {"returned": reason, "call_id": call_id})
+        return reason
+    _turn_chat["sent"] = message
     _recent_chat_sent[key] = now
     try:
         result = mc_send(message)

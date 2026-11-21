@@ -244,7 +244,8 @@ def chat_queue_handle(mc, ctx_swarm):
                                 need_global_chat = any(
                                     [
                                         srv in ctx_game.get("server", "")
-                                        for srv in ["musteryworld"]
+                                        # agicraft: plain chat is local ("Nobody heard you!"), "!" = global
+                                        for srv in ["musteryworld", "agicraft"]
                                     ]
                                 )
                                 # ctx_game.get("server", "") in [
