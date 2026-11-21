@@ -40,7 +40,7 @@ from agent.prompt_generation.prompt_constructor import (
 )
 from agent.tools import tools_config
 from agent.tools.minecraft_tools import new_turn
-from agent.tools.base_tools import address_line, new_chat_turn
+from agent.tools.base_tools import address_line, new_chat_turn, note_author
 from agent.tools.status_tools import get_tool_status
 from character.character_manager import CharacterManager
 from config_schema.general import get_name
@@ -73,7 +73,7 @@ PROTECTION_RE = re.compile(r"(?i)sorry, but you can't|you don't have permission|
 INITIATIVE_SEC = float(os.getenv("INITIATIVE_SEC", "30"))
 # Every voice line also goes to game chat (players and viewers see what was said)
 VOICE_TO_CHAT = os.getenv("VOICE_TO_CHAT", "TRUE").upper() == "TRUE"
-VOICE_TO_CHAT_MAX = 80  # chars: one chat piece (prepare_mc_chat_send splits at 80, pieces get reordered)
+VOICE_TO_CHAT_MAX = 150  # chars: whole sentences, fits one chat line (CHAT_LINE_MAX) with a nick
 ADDRESS_RADIUS = 48.0  # blocks: nearest player within voice-chat range is addressed by nick
 # A voice line is short and tagged *emotion*. Untagged long text or anything huge is the
 # model's planning leaking out ("Let me analyze... 1. position..."), not something to say
@@ -527,6 +527,8 @@ class ChatAgent(BaseAgent):
                 and not character.is_user_ignored(e.get("user", ""))
             ]
 
+            for e in new_events:
+                note_author(e.get("user", ""))
             if new_events:
                 new_msgs, mentioned_users = events_to_messages(
                     new_events, trigger_event.processing_timestamp

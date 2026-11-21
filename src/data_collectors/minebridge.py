@@ -39,6 +39,8 @@ _VANILLA_CHAT = re.compile(r"^<([A-Za-z0-9_]{2,16})>\s*(.+)$", re.S)
 _PIPE_CHAT = re.compile(
     r"^\S{1,3}\s*\|\s*(?:«[^»]*»\s*)?~?([A-Za-z0-9_]{2,16})(?:\s[^:]{0,30})?\s*:\s*(.+)$", re.S
 )
+# any prefixes after the marker ("ʟ |   | Игрок [head] Nick  » text"): first latin nick right before ':' / '»'
+_PIPE_CHAT_ANY = re.compile(r"^\S{1,3}\s*\|.*?(?<![A-Za-z0-9_])~?([A-Za-z0-9_]{3,16})\s*[:»]\s*(.+)$", re.S)
 
 # The mod's py4j gateway sometimes closes (after a reconnect / failed callbacks) and doesn't
 # come back until the game restarts. Its MCP server stays up, and re-setting the port there
@@ -340,7 +342,7 @@ def mine_bridge_handler(ctx_swarm: CtxSwarmType, debug: bool = False):
                         # otherwise players' messages look like server notices
                         if not (msgDict["user"] or "").strip():
                             plain = _MC_FORMAT_CODE.sub("", msgDict["msg"] or "").strip()
-                            m = _VANILLA_CHAT.match(plain) or _PIPE_CHAT.match(plain)
+                            m = _VANILLA_CHAT.match(plain) or _PIPE_CHAT_ANY.match(plain) or _PIPE_CHAT.match(plain)
                             if m:
                                 msgDict["user"], msgDict["msg"] = m.group(1), m.group(2)
                         # server local-chat notice arrives before the player's own message

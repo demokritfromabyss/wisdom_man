@@ -33,14 +33,25 @@ def voice_send(voice_dict: List[Dict]) -> bool:
 def mc_send(message: str) -> bool:
     "Sends message / command to minecraft queue"
     result = tools_config.queue_send(
-        "chat_queue", prepare_mc_chat_send(message, keep_words=_known_nicks())
+        "chat_queue", prepare_mc_chat_send(message, max_length=CHAT_LINE_MAX, keep_words=_known_nicks())
     )
     return result
 
 
+CHAT_LINE_MAX = 200  # one chat line; vanilla limit is 256, longer text was cut into 80-char pieces
+_recent_authors: List[str] = []  # nicks of players who wrote in chat lately, newest last
+
+
+def note_author(nick: str) -> None:
+    if nick and nick not in _recent_authors[-30:]:
+        _recent_authors.append(nick)
+        del _recent_authors[:-30]
+
+
 def _known_nicks() -> list:
-    """Nicks to keep intact in outgoing chat: this turn's interlocutor and players nearby."""
-    nicks = [_turn_chat["to"]]
+    """Nicks to keep intact in outgoing chat: this turn's interlocutor, players nearby,
+    players who wrote in chat lately."""
+    nicks = [_turn_chat["to"]] + _recent_authors
     try:
         from utils.minecraft_helper import get_nearby_players
 
@@ -92,6 +103,8 @@ def address_line(line: str) -> str:
     if not nick or not line or nick.lower() in line.lower():
         return line
     first, _, rest = line.partition(" ")
+    if first.strip(",.!?:;—-").lower() in {n.lower() for n in _known_nicks()}:
+        return line  # the model chose to talk to another known player
     word = first.strip(",.!?:;—-").lower().translate(_CYR_TO_LAT)
     if len(word) >= 3 and word[:3] == nick.lower()[:3] and abs(len(word) - len(nick)) <= 3:
         rest = rest.lstrip(",.!?:;—- ")
