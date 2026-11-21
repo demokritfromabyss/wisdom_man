@@ -13,6 +13,7 @@ Features:
 """
 
 import json
+import math
 import os
 import re
 import time
@@ -39,7 +40,7 @@ from agent.prompt_generation.prompt_constructor import (
 )
 from agent.tools import tools_config
 from agent.tools.minecraft_tools import new_turn
-from agent.tools.base_tools import new_chat_turn
+from agent.tools.base_tools import address_line, new_chat_turn
 from agent.tools.status_tools import get_tool_status
 from character.character_manager import CharacterManager
 from config_schema.general import get_name
@@ -72,13 +73,18 @@ PROTECTION_RE = re.compile(r"(?i)sorry, but you can't|you don't have permission|
 INITIATIVE_SEC = float(os.getenv("INITIATIVE_SEC", "30"))
 # Every voice line also goes to game chat (players and viewers see what was said)
 VOICE_TO_CHAT = os.getenv("VOICE_TO_CHAT", "TRUE").upper() == "TRUE"
-VOICE_TO_CHAT_MAX = 200  # chars; server chat line limit is 256
+VOICE_TO_CHAT_MAX = 80  # chars: one chat piece (prepare_mc_chat_send splits at 80, pieces get reordered)
+ADDRESS_RADIUS = 48.0  # blocks: nearest player within voice-chat range is addressed by nick
 # A voice line is short and tagged *emotion*. Untagged long text or anything huge is the
 # model's planning leaking out ("Let me analyze... 1. position..."), not something to say
 SPEECH_MAX_UNTAGGED = 200
 SPEECH_MAX = 400
 INITIATIVE_MAX_SEC = 300.0  # cap for the pause when quiet moments find nobody
 SEARCHED_MEMORY = 5  # spots where quiet moments found nobody, shown so the model goes elsewhere
+# Body stuck in one place (following someone who stands still, idle among people): after this
+# long within STILL_RADIUS the quiet-moment prompt says so and the model picks a walk
+STILL_SEC = 120.0
+STILL_RADIUS = 5.0
 INITIATIVE_PROMPT = (
     "[Quiet moment, nothing new happened. See -> go -> act: look at the Players list (who is near, "
     "how far, what they hold), your body status and your plan, then choose ONE thing: walk up to "
@@ -213,6 +219,8 @@ class ChatAgent(BaseAgent):
         self._last_turn = time.time()  # last time the agent took a turn (event or own)
         self._initiative_wait = INITIATIVE_SEC  # grows while quiet moments lead nowhere
         self._searched_spots: List[str] = []  # "x z" where we were alone
+        self._still_pos: Optional[tuple] = None  # (x, z) where the body has been standing
+        self._still_since = time.time()
         self._auth_announced = False
         self._user_replies: Dict[str, List[float]] = {}
         self._server_lines_seen: Dict[str, float] = {}
@@ -364,6 +372,7 @@ class ChatAgent(BaseAgent):
                 base += (
                     f"\n⚠️ {trigger_event.user} wrote in GAME CHAT. "
                     f"They CANNOT hear your voice — call chat tool to reply so they see your answer!"
+                    f"\nStart the reply with their exact nick: '{trigger_event.user}, ...'."
                 )
         # Self-activation (idle, initiative) events are not in ctx_chat — their text goes here
         if trigger_event and trigger_event.type == "system" and not trigger_event.user:
@@ -495,7 +504,7 @@ class ChatAgent(BaseAgent):
         self._last_turn = time.time()
         self._interrupts_this_call = 0
         new_turn()  # one move command per turn
-        new_chat_turn()  # one chat line per turn
+        new_chat_turn(self._addressee(trigger_event))  # one chat line per turn, to this nick
 
         # Rebuild system prompt if personality changed → full cache invalidation
         current_personality = self.ctx_swarm["states"].get("personality", "streamer_abstract")
@@ -782,6 +791,7 @@ class ChatAgent(BaseAgent):
             print(f"[CHAT AGENT] 🟢 TTS: {clean_text} *{emotion}*")
             # NOTE: no _add_tool_run_log here — AI response is already in _cached_prefix.
             # Logging speak to ctx_chat would create a duplicate AIMessage in prefix.
+            clean_text = address_line(clean_text)  # "Nick, ..." when talking to someone
             voice_send([{"text": clean_text, "emotion": emotion}])
             if VOICE_TO_CHAT and self.ctx_swarm["game"].get("ingame"):
                 self._mirror_to_chat(clean_text)
@@ -789,12 +799,25 @@ class ChatAgent(BaseAgent):
             print(f"[CHAT AGENT] Speech send error: {e}")
             traceback.print_exc()
 
+    @staticmethod
+    def _chat_cut(text: str) -> str:
+        """One chat line: whole leading sentences up to VOICE_TO_CHAT_MAX, else cut at a word.
+        Longer text gets split into 80-char pieces that arrive out of order."""
+        if len(text) <= VOICE_TO_CHAT_MAX:
+            return text
+        out = ""
+        for sentence in re.split(r"(?<=[.!?…])\s+", text):
+            if len(out) + len(sentence) + 1 > VOICE_TO_CHAT_MAX:
+                break
+            out = f"{out} {sentence}".strip()
+        return out or text[:VOICE_TO_CHAT_MAX].rsplit(" ", 1)[0]
+
     def _mirror_to_chat(self, text: str):
         """Voice line duplicated to game chat. Skipped when the model already wrote the
         same thing with the chat tool (shared repeat guard), so nothing shows twice."""
         from agent.tools.base_tools import _is_chat_repeat, _recent_chat_sent, _turn_chat, mc_send
 
-        line = " ".join(text.split())[:VOICE_TO_CHAT_MAX]
+        line = self._chat_cut(" ".join(text.split()))
         key = " ".join(line.lower().split())
         now = time.time()
         if _turn_chat["sent"]:
@@ -982,6 +1005,46 @@ class ChatAgent(BaseAgent):
         last = max(auth_lines, key=lambda ev: int(ev.get("processing_timestamp", 0)))
         return not AUTH_DONE_RE.search(str(last.get("msg", "")))
 
+    def _addressee(self, trigger_event: CtxEventBase) -> str:
+        """Who this turn talks to: the player who wrote, else the nearest other player
+        within voice range. '' when nobody (lines then go out as they are)."""
+        character = CharacterManager.get_main_character()
+        user = trigger_event.user if trigger_event else ""
+        if (trigger_event and trigger_event.type == "chat" and user and user != SELF_MC_NAME
+                and not trigger_event.additional_fields.get("self", False)
+                and not character.is_user_ignored(user)):
+            return user
+        try:
+            near = get_nearby_players(self.ctx_swarm)
+            others = [
+                (float(p.get("distance", 999)), n) for n, p in near.items()
+                if n != SELF_MC_NAME and not character.is_user_ignored(n)
+            ]
+            others = [o for o in others if o[0] <= ADDRESS_RADIUS]
+            return min(others)[1] if others else ""
+        except Exception:
+            return ""
+
+    def _still_nudge(self, near: dict) -> str:
+        """Body hasn't moved for STILL_SEC (e.g. follows a player who stands AFK): tell the
+        model, the walk itself stays its choice. '' while the body moves."""
+        try:
+            x, _, z = (float(v) for v in near[SELF_MC_NAME]["position"].split(","))
+        except Exception:
+            return ""
+        now = time.time()
+        if self._still_pos is None or math.dist(self._still_pos, (x, z)) > STILL_RADIUS:
+            self._still_pos, self._still_since = (x, z), now
+            return ""
+        still = now - self._still_since
+        if still < STILL_SEC:
+            return ""
+        return (
+            f"\n[Your body has stood in one place for {int(still // 60)} min, even if it is 'following' "
+            "someone. Time to move: '@goto X Z' 20-60 blocks away or '@follow' another player who "
+            "is doing something, and say one short line. This move is allowed even with a task running.]"
+        )
+
     def _build_initiative_prompt(self) -> Optional[str]:
         """Quiet-moment nudge. None when there's nothing to act on: not in game, or the
         server waits for the creator's password (told once)."""
@@ -1001,7 +1064,11 @@ class ChatAgent(BaseAgent):
         others = [n for n in near if n != SELF_MC_NAME and not CharacterManager.get_main_character().is_user_ignored(n)]
         if others:
             self._initiative_wait = INITIATIVE_SEC
-            return INITIATIVE_PROMPT + "\n" + self._character_idea()
+            nearest = min(others, key=lambda n: float(near[n].get("distance", 999) or 999))
+            talk_to = ""
+            if float(near[nearest].get("distance", 999) or 999) <= ADDRESS_RADIUS:
+                talk_to = f"\n[Talk to {nearest}: start your line with the nick, '{nearest}, ...'.]"
+            return INITIATIVE_PROMPT + "\n" + self._character_idea() + talk_to + self._still_nudge(near)
         if self.ctx_swarm["game"].get("hasActiveTask"):
             return None  # still walking somewhere: let the mod get there first
         # Alone: each quiet moment that finds nobody doubles the pause (no endless LLM chain)

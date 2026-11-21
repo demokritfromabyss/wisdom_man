@@ -32,8 +32,23 @@ def voice_send(voice_dict: List[Dict]) -> bool:
 
 def mc_send(message: str) -> bool:
     "Sends message / command to minecraft queue"
-    result = tools_config.queue_send("chat_queue", prepare_mc_chat_send(message))
+    result = tools_config.queue_send(
+        "chat_queue", prepare_mc_chat_send(message, keep_words=_known_nicks())
+    )
     return result
+
+
+def _known_nicks() -> list:
+    """Nicks to keep intact in outgoing chat: this turn's interlocutor and players nearby."""
+    nicks = [_turn_chat["to"]]
+    try:
+        from utils.minecraft_helper import get_nearby_players
+
+        nicks += list(get_nearby_players(tools_config.ctx_swarm).keys())
+    except Exception:
+        pass
+    # longest first, so 'LastOrder02' is kept whole before a shorter nick inside it
+    return sorted({n for n in nicks if n and len(n) >= 3}, key=len, reverse=True)
 
 
 # Same line again within this window is dropped: a stuck loop shouldn't spam the server chat
@@ -44,11 +59,48 @@ CHAT_SIMILAR_WORDS = 0.6  # share of common words that makes two lines "the same
 
 # One chat line per agent turn (chat tool or voice mirrored to chat, whichever comes first):
 # on a global server chat several lines per turn read as spam
-_turn_chat = {"sent": ""}
+_turn_chat = {"sent": "", "to": ""}
 
 
-def new_chat_turn() -> None:
+def new_chat_turn(to: str = "") -> None:
+    """Start of an agent turn. `to` is who this turn talks to (exact game nick) or ''."""
     _turn_chat["sent"] = ""
+    _turn_chat["to"] = to
+
+
+_CYR_TO_LAT = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z",
+    "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+    "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sh",
+    "ы": "y", "э": "e", "ю": "yu", "я": "ya", "ь": "", "ъ": "",
+})
+
+
+_LOWER_AFTER_NICK = {
+    "знаете", "знаешь", "вот", "это", "как", "что", "когда", "если", "даже", "ваш", "ваша",
+    "твой", "твоя", "позвольте", "скажите", "представьте", "видите", "смотрите", "вопрос",
+    "мудрость", "истина", "жизнь", "время", "порядок", "смерть", "ошибка", "ошибки", "уборка",
+}
+
+
+def address_line(line: str) -> str:
+    """Line addressed to this turn's interlocutor by exact nick: 'Nick, ...'.
+    The model often drops the nick or mangles it ('Ranchер', 'Ранчер') — a mangled nick
+    at the start is replaced with the real one."""
+    nick = _turn_chat["to"]
+    line = line.strip()
+    if not nick or not line or nick.lower() in line.lower():
+        return line
+    first, _, rest = line.partition(" ")
+    word = first.strip(",.!?:;—-").lower().translate(_CYR_TO_LAT)
+    if len(word) >= 3 and word[:3] == nick.lower()[:3] and abs(len(word) - len(nick)) <= 3:
+        rest = rest.lstrip(",.!?:;—- ")
+        return f"{nick}, {rest}" if rest else nick
+    # "А вы знаете" -> "Nick, а вы знаете"; names ("Кант") keep their capital
+    bare = first.strip(",.!?:;—-")
+    if bare.lower() in _LOWER_AFTER_NICK or (len(bare) <= 3 and (len(bare) == 1 or bare[1:].islower())):
+        line = line[0].lower() + line[1:]
+    return f"{nick}, {line}"
 
 
 def _is_chat_repeat(key: str, now: float) -> bool:
@@ -80,6 +132,7 @@ def chat(message: str) -> bool:
     Args:
         message: Short text for minecraft chat.
     """
+    message = address_line(str(message))
     call_id = _add_tool_run_log("chat", {"message": message})
     print("***GAME CHAT***", message)
     now = time.time()

@@ -178,16 +178,27 @@ def mc_chat_fix_old_translit(inp: str) -> str:
     return inp
 
 
-def mc_chat_fix(text: str) -> str:
+def mc_chat_fix(text: str, keep_words=()) -> str:
     """
     Clean text to only allow Russian and English characters.
 
     Args:
         text (str): Input text to clean
+        keep_words: player nicks to keep exactly as they are (no cleaning, no
+            transliteration, not counted in the latin budget) — 'Rancher' must not
+            turn into 'Ranchер'
 
     Returns:
         str: Cleaned text with only Russian and English characters
     """
+    # Nicks hidden behind cyrillic placeholders while the text is cleaned
+    kept = {}
+    for i, word in enumerate(w for w in keep_words if w):
+        mark = f" ЖЩНИК{'АБВГДЕЖЗИК'[i % 10]}ЩЖ "
+        new_text = re.sub(re.escape(word), mark, text, flags=re.IGNORECASE)
+        if new_text != text:
+            kept[mark.strip()] = word
+            text = new_text
     # Russian: А-Я, а-я (Unicode: 0410-042F, 0430-044F)
     # English: A-Z, a-z
     pattern = r"[^а-яА-Яa-zA-Z0-9ё ]"
@@ -210,15 +221,18 @@ def mc_chat_fix(text: str) -> str:
         else:
             text_after += char
 
-    return cut_spaces(text_before + translit(text_after))
+    result = cut_spaces(text_before + translit(text_after))
+    for mark, word in kept.items():
+        result = result.replace(mark, word)
+    return result
 
 
-def prepare_mc_chat_send(message: str, max_length=80) -> list[str]:
+def prepare_mc_chat_send(message: str, max_length=80, keep_words=()) -> list[str]:
     if len(message) > 0:
         if message[0] in ["@", "/", "#"]:  # minecraft commands processing
             return [message]
         return [  # temporal fix TODO make workaround for bedwars detecting
-            str(mc_chat_fix(msg))  # str("!" + mc_chat_fix(msg))
+            str(mc_chat_fix(msg, keep_words))  # str("!" + mc_chat_fix(msg))
             for msg in smart_sentence_split(message, max_length=max_length)
         ]
     else:
